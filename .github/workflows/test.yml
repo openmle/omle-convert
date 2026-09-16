@@ -1,0 +1,151 @@
+name: Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+
+  test:
+    name: ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each row pins a DIFFERENT framework combination. Left to pip, every row
+        # would resolve to "newest that supports this interpreter", which both
+        # duplicates (scikit-learn 1.9 would run on three rows, lightgbm 4.7 on
+        # four) and leaves whole series untested — and the coverage would drift
+        # silently every time upstream publishes.
+        #
+        # Pins stay inside series upstream still maintains; anything older is not
+        # worth a CI slot. Revisit when a pinned series goes stale.
+        #
+        # Collectively: scikit-learn 1.7-1.9, xgboost 3.0-3.4, lightgbm 4.7,
+        # category_encoders 2.8-2.11, Spark 3.5 and 4.x, plus one unpinned row.
+        #
+        # The dev-extra floors in pyproject.toml (scikit-learn 1.6, xgboost 2.1,
+        # lightgbm 4.6, catboost 1.2.7, category_encoders 2.6.4) all sit below
+        # the oldest row here, so no row exercises them. Raise them to match
+        # this matrix, or accept that the declared minimums are untested.
+        #
+        # catboost is pinned by PATCH, not minor: it ships one long-lived series
+        # (1.1 is 47 months stale, so 1.2 is effectively the only one) but that
+        # series has 11 releases spanning 41 months, which is more drift than
+        # lightgbm has across its minors. Wheel coverage bounds the choices:
+        # cp312 needs >=1.2.3, cp313 needs >=1.2.8, cp314 needs >=1.2.9.
+        #
+        # category_encoders is pinned by PATCH for the same reason its series
+        # boundaries are interpreter-driven: 2.8.1 is the ceiling on Python 3.10
+        # so that row is already determined. Everything from 2.9 requires 3.11+,
+        # which would collapse the remaining rows onto whatever is newest;
+        # pinning 2.9, 2.10 and 2.11 keeps each post-3.11 series covered and
+        # leaves the canary unpinned.
+        include:
+          # Oldest supported interpreter, and the oldest framework combination
+          # still under test. scikit-learn 1.7 and lightgbm 4.7 both require
+          # 3.10+, so this is the earliest interpreter that can carry them.
+          - label: "py3.10 / oldest maintained"
+            python-version: "3.10"
+            pins: >-
+              scikit-learn==1.7.*
+              xgboost==3.0.*
+              lightgbm==4.7.*
+              catboost==1.2.8
+              category_encoders==2.8.1
+              pyspark==3.5.*
+
+          - label: "py3.11 / sklearn 1.8, xgb 3.2"
+            python-version: "3.11"
+            pins: >-
+              scikit-learn==1.8.*
+              xgboost==3.2.*
+              lightgbm==4.7.*
+              catboost==1.2.9
+              category_encoders==2.9.0
+              pyspark==3.5.*
+
+          # xgboost 3.3+ requires 3.12, so this is the earliest row that can test
+          # it. Spark 4 rides the newer interpreters; 3.5 is covered above.
+          - label: "py3.12 / sklearn 1.9, xgb 3.3, Spark 4"
+            python-version: "3.12"
+            pins: >-
+              scikit-learn==1.9.*
+              xgboost==3.3.*
+              lightgbm==4.7.*
+              catboost==1.2.10
+              category_encoders==2.10.0
+
+          # Newly pinned now that 3.14 is the canary: without pins this row and
+          # the one below would both resolve to "all latest" and cover the same
+          # ground. xgboost 3.4 and category_encoders 2.11 are only reachable
+          # here and above.
+          - label: "py3.13 / xgb 3.4, ce 2.11"
+            python-version: "3.13"
+            pins: >-
+              xgboost==3.4.*
+              category_encoders==2.11.*
+
+          # Deliberately unpinned: the canary that catches a new upstream release
+          # breaking us before anyone has pinned it.
+          - label: "py3.14 / all latest"
+            python-version: "3.14"
+
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Set up JDK 17
+        # Every row needs a JVM: pyspark runs one for all of its tests, not just
+        # the suite that loads third-party JARs. Spark 4 requires 17+ and Spark
+        # 3.5 supports it, so one JDK covers the whole matrix.
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package with dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Apply framework pins for this matrix cell
+        if: matrix.pins != ''
+        run: pip install ${{ matrix.pins }}
+
+      - name: Record the framework versions under test
+        # Printed so a failure report names the combination that broke, rather
+        # than leaving it to be reconstructed from the interpreter version.
+        run: |
+          java -version
+          python - <<'PY'
+          import importlib.metadata as md
+          for pkg in ("scikit-learn", "xgboost", "lightgbm", "catboost",
+                      "category_encoders", "synapseml", "pyspark", "numpy",
+                      "pandas", "pyarrow"):
+              try:
+                  print(f"{pkg:18s} {md.version(pkg)}")
+              except md.PackageNotFoundError:
+                  print(f"{pkg:18s} (not installed)")
+          PY
+
+      - name: Run tests
+        # Including tests/test_spark_jvm.py. It used to be excluded because it
+        # needed third-party JARs downloaded by hand; it no longer does. The
+        # `sparkxgb` tests are gone and SynapseML resolves its JARs from Maven
+        # at session start, so `pip install -e ".[dev]"` plus the JDK above is
+        # the entire setup.
+        run: pytest tests/

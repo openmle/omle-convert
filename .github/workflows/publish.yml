@@ -1,0 +1,257 @@
+name: Publish
+
+# Publishes omle-convert to PyPI.
+#
+# Two ways to run:
+#   1. Push a version tag  →  builds, verifies, publishes to PyPI.
+#        git tag v0.1.0 && git push origin v0.1.0
+#   2. Run manually        →  builds, verifies, publishes to TestPyPI
+#        (Actions → Publish → Run workflow)
+#
+# ORDERING: this package depends on `omle>=0.1.0`, so the verify jobs cannot
+# install the built wheel until omle itself is on PyPI. Publish omle
+# first; until then every run of this workflow fails at "Install the wheel".
+#
+# Authentication uses PyPI Trusted Publishing (OIDC) — no API tokens or
+# secrets. Before the first run, register this workflow as a trusted publisher:
+#   PyPI:     https://pypi.org/manage/account/publishing/
+#   TestPyPI: https://test.pypi.org/manage/account/publishing/
+# with owner "openmle", repository "omle-convert", workflow "publish.yml",
+# and environment "pypi" / "testpypi" respectively.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          # setuptools-scm derives the version from git tags — a shallow
+          # checkout yields a dev version with a local segment.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: pip install build twine
+
+      - name: Build sdist and wheel
+        run: |
+          rm -rf build dist
+          python -m build
+
+      - name: Check metadata
+        run: twine check dist/*
+
+      - name: Reject versions PyPI will not accept
+        run: |
+          python - <<'PY'
+          import glob
+          import os
+          import sys
+
+          wheels = glob.glob("dist/*.whl")
+          if len(wheels) != 1:
+              sys.exit(f"::error::Expected exactly one wheel in dist/, found {wheels}")
+
+          # Wheel filenames are {name}-{version}-{python}-{abi}-{platform}.whl;
+          # parse the basename so a '-' in the workspace path cannot shift fields.
+          version = os.path.basename(wheels[0]).split("-")[1]
+          print(f"Built version: {version}")
+
+          if "+" in version:
+              print(
+                  f"::error::Version '{version}' carries a local segment, which PyPI "
+                  "rejects. Publish from a checkout of a version tag (e.g. git tag v0.1.0)."
+              )
+              sys.exit(1)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  verify:
+    name: Verify install (${{ matrix.python-version }})
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install the wheel
+        # Pulls omle from PyPI — see the ORDERING note at the top of this file.
+        run: pip install pytest scikit-learn pandas numpy dist/*.whl
+
+      - name: Run the scikit-learn suite against the installed wheel
+        # -o pythonpath= drops the src/ entries from pyproject.toml so the tests
+        # exercise the wheel that is about to be published, not the checkout.
+        # test_cli.py skips its XGBoost/LightGBM cases via importorskip.
+        run: |
+          python -c "import omle_convert; print('testing:', omle_convert.__file__)"
+          pytest tests/test_sklearn.py tests/test_cli.py -o pythonpath=
+
+      - name: Smoke-test an end-to-end conversion
+        # Run from a scratch directory so the repo checkout cannot satisfy imports.
+        run: |
+          mkdir -p /tmp/smoke && cd /tmp/smoke
+          python - <<'PY'
+          from sklearn.datasets import make_classification
+          from sklearn.ensemble import RandomForestClassifier
+          from sklearn.pipeline import make_pipeline
+          from sklearn.preprocessing import StandardScaler
+
+          import omle
+          from omle_convert import export_omle
+
+          X, y = make_classification(n_samples=64, n_features=6, random_state=0)
+          pipeline = make_pipeline(StandardScaler(), RandomForestClassifier(n_estimators=5, random_state=0))
+          pipeline.fit(X, y)
+
+          export_omle(pipeline, "smoke.omle", X=X)
+
+          model = omle.load("smoke.omle")
+          result = omle.validate(model)
+          assert result.is_valid, result
+          print("converted and validated:", [f"{n.domain}.{n.op}" for n in model.nodes])
+          PY
+          omle-convert --help > /dev/null && echo "CLI ok"
+
+  verify-frameworks:
+    name: Verify install (gradient boosting frameworks)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Set up JDK 17
+        # For the Spark suites, which fit models through a real SparkSession.
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install the wheel with the supported frameworks
+        run: |
+          pip install pytest scikit-learn pandas numpy category_encoders \
+            xgboost lightgbm catboost pyspark synapseml dist/*.whl
+
+      - name: Run the framework suites against the installed wheel
+        # The whole suite, Spark included: the JDK above plus these packages are
+        # all it needs, and the release gate should exercise every converter the
+        # wheel claims to ship.
+        run: pytest tests/ -o pythonpath=
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    if: github.event_name == 'workflow_dispatch'
+    needs: [verify, verify-frameworks]
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/omle-convert
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [verify, verify-frameworks]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/omle-convert
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: Create the GitHub release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # No build artifacts are attached. PyPI is the distribution channel
+          # for this package and already serves the wheel and sdist, with
+          # checksums, for every version; duplicating them here would only add
+          # a second copy to keep in sync. GitHub still serves the auto-
+          # generated source archives for the tag. This job exists so that a
+          # tag pushed from the command line still gets a release with notes.
+          #
+          # The release may already exist: creating one through the GitHub web
+          # UI creates the tag as well, and that tag push is what triggers this
+          # workflow, so `gh release create` would fail with "a release with the
+          # same tag name already exists".
+          if gh release view "${GITHUB_REF_NAME}" \
+               --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists; nothing to do."
+            exit 0
+          fi
+
+          # PEP 440 pre-release tags (v1.2.3rc1, a1, b1) must not be published
+          # as the latest stable release.
+          prerelease=""
+          if printf '%s' "${GITHUB_REF_NAME}" | grep -qE '(a|b|rc)[0-9]+$'; then
+            prerelease="--prerelease"
+          fi
+
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes ${prerelease}

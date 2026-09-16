@@ -1,0 +1,122 @@
+[build-system]
+requires = ["setuptools>=77", "setuptools-scm>=8", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omle-convert"
+dynamic = ["version"]
+description = "Converters from popular ML frameworks to the OMLE format"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "OMLE" }]
+keywords = [
+    "machine learning", "model conversion", "omle", "scikit-learn",
+    "xgboost", "lightgbm", "catboost", "spark ml", "inference",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+# Only omle-convert's own machinery is a dependency. The ML frameworks are
+# loaded dynamically at call time and are deliberately NOT declared: if you have
+# a trained model to convert, you already have the framework that produced it,
+# and pinning it here would only invite version conflicts. A missing framework
+# raises a clear ImportError naming the package to install.
+dependencies = [
+    "omle>=0.1.0",
+    "numpy>=1.23",
+    "pandas>=1.5",
+    "pyarrow>=12.0",
+    "sqlglot>=20.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/openmle/omle-convert"
+Repository = "https://github.com/openmle/omle-convert"
+Issues = "https://github.com/openmle/omle-convert/issues"
+"OMLE format" = "https://github.com/openmle/omle"
+
+[project.optional-dependencies]
+# The ML frameworks are intentionally absent — see the dependencies note above.
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.16",
+    # Floors track what upstream still maintains, not the oldest thing that
+    # once worked. scikit-learn <1.4 additionally import-fails with
+    # "numpy.dtype size changed" once numpy>=2 resolves (pre-numpy-2 ABI).
+    "scikit-learn>=1.6",
+    "xgboost>=2.1",
+    "lightgbm>=4.6",
+    "catboost>=1.2.7",
+    "category_encoders>=2.6.4",
+    "pyspark>=3.5",
+    "synapseml",
+]
+
+[tool.ruff]
+# Google Python Style Guide: 4-space indent, 80-column limit.
+line-length = 80
+indent-width = 4
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E4", "E7", "E9",  # pycodestyle errors
+    "F",               # pyflakes
+    "W",               # pycodestyle warnings
+    "I",               # import sorting
+    "N",               # naming conventions
+    "B",               # flake8-bugbear
+]
+ignore = [
+    # `X` for a design matrix and `N` for a row count are the universal
+    # convention in ML code — scikit-learn's own public API uses them, and
+    # these converters mirror the APIs they read. Likewise `F`/`C`/`R` for
+    # pyspark.ml submodules follows PySpark's own idiom.
+    "N802",  # function name (test_..._is_X, _prepare_X_arr)
+    "N803",  # argument name (X)
+    "N806",  # variable in function (X, N)
+    "N812",  # lowercase module imported as non-lowercase (F, C, R, CL)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Package re-export hubs: the imports are the public API surface.
+"src/omle_convert/__init__.py" = ["F401"]
+"src/omle_convert/sklearn/__init__.py" = ["F401"]
+# Tests guard optional frameworks with `try: import X ... except ImportError`,
+# which necessarily puts imports below code (E402) and imports names purely to
+# probe availability (F401). The blind `pytest.raises(Exception)` cases (B017)
+# assert that a third-party library rejects bad input; the exact exception type
+# varies by library version, so narrowing it would make the tests brittle.
+"tests/*" = ["E402", "F401", "B017"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = ["omle", "omle_convert"]
+
+[project.scripts]
+omle-convert = "omle_convert.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["omle_convert*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "../omle/src"]
+
+[tool.setuptools_scm]
+version_file = "src/omle_convert/_version.py"
