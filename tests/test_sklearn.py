@@ -5383,3 +5383,82 @@ class TestSklearnDataFramePipelines:
         m = _load_runtime(_ir)
         assert np.array_equal(m.predict(df), p.predict(df))
         np.testing.assert_allclose(m.predict_proba(df), p.predict_proba(df), rtol=1e-4, atol=1e-4)
+
+
+class TestOneClassSVMAnomaly:
+    """OneClassSVM and SGDOneClassSVM → AnomalyDetection node."""
+
+    def _node(self, estimator, X):
+        m = from_sklearn(estimator, X=X)
+        node = next(n for n in m.nodes if n.op == "AnomalyDetection")
+        assert node.domain == "omle.ml"
+        return node, m
+
+    def _tensor_values(self, m, tv):
+        if tv.tensor_ref is not None:
+            entry = next(e for e in m.tensor_entries if e.id == tv.tensor_ref.id)
+            return list(entry.dense.float64_data)
+        return list(tv.tensor.float64_data)
+
+    def test_one_class_svm_rbf(self, regression_data):
+        from sklearn.svm import OneClassSVM
+        X, _ = regression_data
+        est = OneClassSVM(kernel="rbf", gamma=0.3, nu=0.2).fit(X)
+        node, m = self._node(est, X)
+
+        ocs = node.anomaly_detection.one_class_svm
+        assert ocs is not None
+        assert ocs.kernel_svm.kernel_type.name == "RBF"
+        assert ocs.kernel_svm.gamma.double_value == pytest.approx(est._gamma)
+        # score_samples is the plain kernel sum, so no intercept is stored; the
+        # offset carries it and decision_function is score - offset.
+        assert ocs.kernel_svm.intercept is None
+        assert ocs.offset.double_value == pytest.approx(float(np.ravel(est.offset_)[0]))
+
+        sv = self._tensor_values(m, ocs.kernel_svm.support_vectors)
+        assert len(sv) == est.support_vectors_.size
+        dual = self._tensor_values(m, ocs.kernel_svm.dual_coefficients)
+        assert dual == pytest.approx(est.dual_coef_.ravel().tolist())
+
+    @pytest.mark.parametrize("kernel", ["linear", "poly", "sigmoid"])
+    def test_one_class_svm_kernels(self, regression_data, kernel):
+        from sklearn.svm import OneClassSVM
+        X, _ = regression_data
+        est = OneClassSVM(kernel=kernel, nu=0.2, degree=2, coef0=1.0).fit(X)
+        node, _ = self._node(est, X)
+        ocs = node.anomaly_detection.one_class_svm
+        assert ocs.kernel_svm.kernel_type.name == kernel.upper()
+        assert ocs.kernel_svm.degree == est.degree
+        assert ocs.kernel_svm.coef0.double_value == pytest.approx(est.coef0)
+
+    def test_one_class_svm_rejects_precomputed_kernel(self, regression_data):
+        from sklearn.svm import OneClassSVM
+        X, _ = regression_data
+        est = OneClassSVM(kernel="precomputed", nu=0.2)
+        est.fit(X @ X.T)
+        with pytest.raises(NotImplementedError, match="precomputed"):
+            from_sklearn(est, X=X)
+
+    def test_sgd_one_class_svm(self, regression_data):
+        from sklearn.linear_model import SGDOneClassSVM
+        X, _ = regression_data
+        est = SGDOneClassSVM(nu=0.2, random_state=0).fit(X)
+        node, m = self._node(est, X)
+
+        lin = node.anomaly_detection.linear_one_class_svm
+        assert lin is not None
+        # score_samples(X) = X @ coef_, with offset_ applied separately.
+        assert lin.intercept is None
+        assert lin.offset.double_value == pytest.approx(float(est.offset_.ravel()[0]))
+        coef = self._tensor_values(m, lin.coefficients)
+        assert coef == pytest.approx(est.coef_.ravel().tolist())
+
+    def test_anomaly_metadata_is_set(self, regression_data):
+        from sklearn.svm import OneClassSVM
+        X, _ = regression_data
+        node, _ = self._node(OneClassSVM(nu=0.2).fit(X), X)
+        ad = node.anomaly_detection
+        assert ad.task_type.name == "ANOMALY_DETECTION"
+        assert ad.mode.name == "NOVELTY_DETECTION"
+        assert ad.raw_score_polarity.name == "LOWER_MORE_ABNORMAL"
+        assert ad.threshold is not None

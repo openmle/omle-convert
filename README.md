@@ -94,7 +94,7 @@ supported.
 
 | Framework | Entry points | Estimators | Preprocessing | Reference |
 |---|---|---|---|---|
-| scikit-learn | `from_sklearn` | **73** — 56 direct, 13 meta (voting, stacking, bagging, boosting, multi-output, OVR), 4 delegated to the xgboost/lightgbm converters | **51** — 29 transformers, 10 selectors, 9 `category_encoders` (last row), 4 text vectorizers | [docs/sklearn.md](https://github.com/openmle/omle-convert/blob/main/docs/sklearn.md) |
+| scikit-learn | `from_sklearn` | **75** — 58 direct, 13 meta (voting, stacking, bagging, boosting, multi-output, OVR), 4 delegated to the xgboost/lightgbm converters | **51** — 29 transformers, 10 selectors, 9 `category_encoders` (last row), 4 text vectorizers | [docs/sklearn.md](https://github.com/openmle/omle-convert/blob/main/docs/sklearn.md) |
 | Spark ML | `from_spark`, `from_spark_live` | **25** — 21 direct (6 of them third-party: `xgboost.spark`, XGBoost4J, SynapseML LightGBM), 4 meta (`PipelineModel`, `CrossValidatorModel`, `TrainValidationSplitModel`, `OneVsRestModel`) | **25** — 17 feature transformers, 8 text; `SQLTransformer` compiles to `Derive` nodes via `sqlglot` | [docs/spark.md](https://github.com/openmle/omle-convert/blob/main/docs/spark.md) |
 | XGBoost | `from_xgboost`, `from_xgboost_json` | **5** sklearn wrappers (incl. `XGBRF*`, `XGBRanker`), plus `xgb.Booster` and `.json` | categorical columns only — a `LabelEncoder` or `OrdinalEncoder` node per column | [docs/xgboost.md](https://github.com/openmle/omle-convert/blob/main/docs/xgboost.md) |
 | LightGBM | `from_lightgbm`, `from_lightgbm_text` | **3** sklearn wrappers (incl. `LGBMRanker`), plus `lgb.Booster` and `.txt` | categorical columns only — a `LabelEncoder` node per column | [docs/lightgbm.md](https://github.com/openmle/omle-convert/blob/main/docs/lightgbm.md) |
@@ -153,7 +153,7 @@ score, so it takes none of them.
 | `SVM` | SVC, SVR, LinearSVC, LinearSVR, NuSVC, NuSVR, Spark LinearSVC |
 | `NeuralNetwork` | MLPClassifier/Regressor, Spark MultilayerPerceptronClassifier |
 | `KNN` | KNeighborsClassifier/Regressor, RadiusNeighborsClassifier/Regressor |
-| `AnomalyDetection` | IsolationForest, LocalOutlierFactor (novelty=True), EllipticEnvelope |
+| `AnomalyDetection` | IsolationForest, LocalOutlierFactor (novelty=True), EllipticEnvelope, OneClassSVM, SGDOneClassSVM |
 
 **Preprocessing operators**
 
