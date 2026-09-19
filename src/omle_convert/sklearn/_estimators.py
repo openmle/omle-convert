@@ -7,7 +7,7 @@ from typing import Optional
 import omle
 from omle.ir.bodies import TreeEnsemble
 from omle.ir.tensor import Tensor
-from omle.ir.types import Scalar, TensorValue
+from omle.ir.types import TensorValue
 
 from .._common import TaskType, make_node_outputs
 from ._anomaly_detection import (

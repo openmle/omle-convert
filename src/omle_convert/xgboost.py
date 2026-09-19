@@ -36,7 +36,7 @@ from omle.ir.enums import (
     TreeSplitOp,
 )
 from omle.ir.tensor import Tensor
-from omle.ir.types import Scalar, TensorValue
+from omle.ir.types import TensorValue
 
 from ._common import (
     TaskType,

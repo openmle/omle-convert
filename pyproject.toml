@@ -53,6 +53,10 @@ Issues = "https://github.com/openmle/omle-convert/issues"
 dev = [
     "pytest>=8.0",
     "ruff>=0.16",
+    # Local enforcement of .pre-commit-config.yaml. The hook lives in
+    # .git/hooks/, which no clone inherits, so it needs a one-time
+    # `pre-commit install` per checkout; CI runs the same config.
+    "pre-commit>=4.0",
     # Floors track what upstream still maintains, not the oldest thing that
     # once worked. scikit-learn <1.4 additionally import-fails with
     # "numpy.dtype size changed" once numpy>=2 resolves (pre-numpy-2 ABI).

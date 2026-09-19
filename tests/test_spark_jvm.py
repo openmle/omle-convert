@@ -24,8 +24,8 @@ except ImportError:
 pytestmark = pytest.mark.skipif(not HAS_PYSPARK, reason="pyspark not installed")
 
 import os
-import tempfile
 import re
+import tempfile
 from pathlib import Path
 
 import omle
