@@ -35,7 +35,7 @@ classifiers = [
 # and pinning it here would only invite version conflicts. A missing framework
 # raises a clear ImportError naming the package to install.
 dependencies = [
-    "omle>=0.1.0",
+    "omle>=0.1.1rc1",
     "numpy>=1.23",
     "pandas>=1.5",
     "pyarrow>=12.0",
