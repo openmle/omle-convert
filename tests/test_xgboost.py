@@ -999,9 +999,9 @@ class TestXGBFloat64:
         assert m.inputs[0].type.shape[1] == X.shape[1]
 
 
-# ── omleruntime numerical verification ─────────────────────────────────────
+# ── omle_runtime numerical verification ─────────────────────────────────────
 
-omr = pytest.importorskip("omleruntime", reason="omleruntime not installed")
+omr = pytest.importorskip("omle_runtime", reason="omle_runtime not installed")
 
 
 def _load_runtime(ir_model) -> "omr.Model":

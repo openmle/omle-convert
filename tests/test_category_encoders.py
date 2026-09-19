@@ -190,7 +190,7 @@ class TestLeaveOneOutEncoderConverter:
 
 # ── Runtime tests ─────────────────────────────────────────────────────────────
 
-omr = pytest.importorskip("omleruntime", reason="omleruntime not installed")
+omr = pytest.importorskip("omle_runtime", reason="omle_runtime not installed")
 
 
 def _load_runtime(ir_model):

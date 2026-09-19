@@ -32,7 +32,7 @@ if _HAS_PYSPARK:
         if (_RUNTIME_ROOT / "spark" / "target").exists() else iter([]),
         None,
     )
-    _NATIVE_LIB = _RUNTIME_ROOT / "python" / "omleruntime"
+    _NATIVE_LIB = _RUNTIME_ROOT / "python" / "omle_runtime"
     _RUNTIME_JAR = _RUNTIME_ROOT / "java" / "target" / "omle-runtime-0.1.0.jar"
     _JNA_JAR = next(
         iter(

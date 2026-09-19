@@ -63,6 +63,21 @@ dev = [
     "category_encoders>=2.6.4",
     "pyspark>=3.5",
     "synapseml",
+    # The numerical verification tests load converted models into the real
+    # runtime. They are guarded by pytest.importorskip("omle_runtime"), so
+    # without this they skip silently and the suite reports green while the
+    # assertions never execute — which is how XGBoost models missing their
+    # base_score shipped. omle-runtime only reached PyPI recently; before that
+    # the gate could not be satisfied in CI at all.
+    "omle-runtime",
+    # The JVM Spark tests drive the transformer from omle-spark. Pinned above
+    # 0.1.0rc4 deliberately: every release up to and including it ships an
+    # `omle/__init__.py`, which overwrites the one from the omle SDK and leaves
+    # `import omle` returning an empty module. Until a release with the
+    # omle_spark layout exists this fails to resolve, which is the intended
+    # outcome — installing rc4 would break the suite in a way that looks like a
+    # bug in omle itself.
+    "omle-spark>0.1.0rc4",
 ]
 
 [tool.ruff]

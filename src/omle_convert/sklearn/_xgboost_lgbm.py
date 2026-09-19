@@ -31,7 +31,7 @@ def _convert_xgb(
 ) -> None:
     """Convert an XGBClassifier or XGBRegressor node into the builder."""
     from omle_convert.xgboost import (
-        _base_score,
+        _base_scores,
         _convert_trees,
         _get_booster,
         _make_ensemble,
@@ -41,7 +41,8 @@ def _convert_xgb(
     feat_index = make_feature_index(fn)
     trees, tree_group = _convert_trees(booster, feat_index, n_classes, task,
                                        builder.tensor_entries)
-    ensemble = _make_ensemble(trees, tree_group, task, _base_score(estimator, booster))
+    ensemble = _make_ensemble(trees, tree_group, task,
+                              _base_scores(estimator, booster))
     builder.add_node(omle.Node(
         name="tree_ensemble",
         domain="omle.ml",

@@ -44,7 +44,7 @@ def _all_nodes(nodes):
 
 
 def _load_runtime(ir_model):
-    omr = pytest.importorskip("omleruntime", reason="omleruntime not installed")
+    omr = pytest.importorskip("omle_runtime", reason="omle_runtime not installed")
     from omle.proto.convert import ir_to_proto
     data = ir_to_proto(ir_model).SerializeToString()
     return omr.load_bytes(data)
@@ -634,7 +634,7 @@ class TestGradientBoostingRegressor:
     def test_base_score_set(self, gb_regressor):
         m = from_sklearn(gb_regressor)
         _assert_std_io(m, task="regression")
-        assert m.nodes[0].tree_ensemble.base_score is not None
+        assert m.nodes[0].tree_ensemble.base_scores is not None
 
     def test_no_tree_group(self, gb_regressor):
         m = from_sklearn(gb_regressor)
@@ -672,7 +672,7 @@ class TestGradientBoostingBinary:
     def test_base_score_set(self, gb_binary):
         m = from_sklearn(gb_binary)
         _assert_std_io(m, task="binary")
-        assert m.nodes[0].tree_ensemble.base_score is not None
+        assert m.nodes[0].tree_ensemble.base_scores is not None
 
     def test_schema_binary_target(self, gb_binary):
         m = from_sklearn(gb_binary)
@@ -763,7 +763,7 @@ class TestHistGradientBoostingRegressor:
     def test_base_score_set(self, hgb_regressor):
         m = from_sklearn(hgb_regressor)
         _assert_std_io(m, task="regression")
-        assert m.nodes[0].tree_ensemble.base_score is not None
+        assert m.nodes[0].tree_ensemble.base_scores is not None
 
     def test_schema_regression_target(self, hgb_regressor):
         m = from_sklearn(hgb_regressor)
@@ -796,7 +796,7 @@ class TestHistGradientBoostingBinary:
     def test_base_score_set(self, hgb_binary):
         m = from_sklearn(hgb_binary)
         _assert_std_io(m, task="binary")
-        assert m.nodes[0].tree_ensemble.base_score is not None
+        assert m.nodes[0].tree_ensemble.base_scores is not None
 
     def test_schema_binary_target(self, hgb_binary):
         m = from_sklearn(hgb_binary)

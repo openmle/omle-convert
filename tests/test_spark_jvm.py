@@ -25,6 +25,7 @@ pytestmark = pytest.mark.skipif(not HAS_PYSPARK, reason="pyspark not installed")
 
 import os
 import tempfile
+import re
 from pathlib import Path
 
 import omle
@@ -33,34 +34,121 @@ from omle_convert.spark import from_spark_live
 # ── omle-spark JAR detection (for runtime prediction-match tests) ───────────
 
 _RUNTIME_ROOT = Path(__file__).resolve().parent.parent.parent / "omle-runtime"
-_SPARK_JAR_GLOB = [
-    p for p in (_RUNTIME_ROOT / "spark" / "target").glob("scala-*/omle-spark_*.jar")
-    if not p.name.endswith(("-javadoc.jar", "-sources.jar"))
-] if (_RUNTIME_ROOT / "spark" / "target").exists() else []
-_SPARK_JAR  = _SPARK_JAR_GLOB[0] if _SPARK_JAR_GLOB else None
-_NATIVE_LIB = _RUNTIME_ROOT / "python" / "omleruntime"
-_RUNTIME_JAR = _RUNTIME_ROOT / "java" / "target" / "omle-runtime-0.1.0.jar"
-_JNA_JAR_GLOB = (
-    list(Path.home().glob("Library/Caches/Coursier/**/jna/jna/*/jna-[0-9]*.jar")) or
-    list(Path.home().glob(".ivy2/**/net.java.dev.jna/jna/*/jars/jna-*.jar"))
-)
-_JNA_JAR = _JNA_JAR_GLOB[0] if _JNA_JAR_GLOB else None
+def _pyspark_scala_version():
+    """Scala binary version the installed PySpark was built with.
 
-_SPARK_ML_FILE = _RUNTIME_ROOT / "spark" / "python" / "omle" / "spark" / "ml.py"
-if _SPARK_JAR is not None and _SPARK_ML_FILE.exists():
-    import importlib.util as _ilu
-    _spec = _ilu.spec_from_file_location("omle.spark.ml", _SPARK_ML_FILE)
-    _spark_ml_mod = _ilu.module_from_spec(_spec)
-    _spec.loader.exec_module(_spark_ml_mod)
-    _OMLEModel = _spark_ml_mod.OMLEModel
-    HAS_OMLE_SPARK = True
-else:
+    Read from the bundled jar name rather than guessed from the PySpark
+    version: PyPI ships Spark 3.x built with Scala 2.12 and 4.x with 2.13, and
+    the two are binary-incompatible.
+    """
+    try:
+        import pyspark
+    except ImportError:
+        return None
+    jars = Path(pyspark.__file__).parent / "jars"
+    for jar in jars.glob("spark-core_*.jar"):
+        return jar.name.split("_", 1)[1].split("-", 1)[0]
+    return None
+
+
+def _find_spark_jar():
+    """The omle-spark jar matching the running PySpark.
+
+    target/ holds one jar per cross-built Scala version, plus anything left by
+    earlier builds. Loading the wrong one does not fail at load: the class
+    simply is not found, and pyspark reports `'JavaPackage' object is not
+    callable`, which says nothing about Scala versions.
+    """
+    target = _RUNTIME_ROOT / "spark" / "target"
+    jars = [
+        p for p in (target.glob("scala-*/omle-spark_*.jar") if target.is_dir() else [])
+        if not p.name.endswith(("-javadoc.jar", "-sources.jar"))
+    ]
+    want = _pyspark_scala_version()
+    if want:
+        jars = [p for p in jars if f"_{want}-" in p.name]
+    return max(jars, key=lambda p: p.stat().st_mtime) if jars else None
+
+
+_SPARK_JAR = _find_spark_jar()
+_NATIVE_LIB = _RUNTIME_ROOT / "python" / "omle_runtime"
+# Matched by prefix, not by name: omle-runtime takes its version from the git
+# tag, so the filename is not known here. Newest by mtime because version
+# strings do not sort lexically (0.10.0 < 0.2.0), and target/ accumulates jars
+# from earlier builds.
+def _newest_runtime_jar():
+    target = _RUNTIME_ROOT / "java" / "target"
+    jars = [
+        p for p in (target.glob("omle-runtime-*.jar") if target.is_dir() else [])
+        if not p.name.endswith(("-sources.jar", "-javadoc.jar"))
+    ]
+    return max(jars, key=lambda p: p.stat().st_mtime) if jars else None
+
+
+_RUNTIME_JAR = _newest_runtime_jar()
+def _find_jna_jar():
+    """Locate the JNA jar in whichever dependency cache holds it.
+
+    Maven first: the JVM bindings declare JNA in java/pom.xml, so `mvn package`
+    always leaves it there at the pinned version. The Coursier caches are the
+    sbt side of the same dependency and their location is platform-specific —
+    globbing only the macOS path is why this found nothing on Linux.
+    """
+    home = Path.home()
+    roots = []
+    if os.environ.get("COURSIER_CACHE"):
+        roots.append(Path(os.environ["COURSIER_CACHE"]))
+    roots += [
+        home / ".m2" / "repository",
+        home / ".cache" / "coursier",
+        home / "Library" / "Caches" / "Coursier",
+        home / ".ivy2",
+    ]
+    patterns = (
+        "**/jna/jna/*/jna-[0-9]*.jar",
+        "**/net.java.dev.jna/jna/*/jars/jna-[0-9]*.jar",
+        "**/net.java.dev.jna/jna/jars/jna-[0-9]*.jar",
+    )
+    for root in roots:
+        if not root.is_dir():
+            continue
+        found = [
+            j for pat in patterns for j in root.glob(pat)
+            if not j.name.endswith(("-sources.jar", "-javadoc.jar"))
+        ]
+        if found:
+            # Newest version wins; the version is in the filename.
+            def key(j):
+                return tuple(int(m.group()) if (m := re.match(r"\d+", part)) else 0
+                             for part in j.stem.split("-", 1)[-1].split("."))
+            return max(found, key=key)
+    return None
+
+
+_JNA_JAR = _find_jna_jar()
+
+# omle-spark is a declared dev dependency, so the transformer is imported
+# rather than loaded from a path inside the sibling checkout. The old approach
+# pointed at spark/python/omle/spark/ml.py and was guarded by .exists(), so when
+# that package was renamed the tests did not fail — they silently stopped
+# running.
+#
+# The JAR still has to be built locally: it carries the Scala transformer these
+# tests drive, and no Python package can supply it.
+try:
+    from omle_spark import OMLEModel as _OMLEModel
+    _HAS_OMLE_SPARK_PKG = True
+except ImportError:
     _OMLEModel = None
-    HAS_OMLE_SPARK = False
+    _HAS_OMLE_SPARK_PKG = False
+
+HAS_OMLE_SPARK = _SPARK_JAR is not None and _HAS_OMLE_SPARK_PKG
 
 skip_no_omle_spark = pytest.mark.skipif(
     not HAS_OMLE_SPARK,
-    reason="omle-spark JAR not found — run `sbt package` in omle-runtime/spark",
+    reason=("omle-spark JAR not found (run `sbt package` in omle-runtime/spark)"
+            if _HAS_OMLE_SPARK_PKG
+            else "omle-spark package not installed"),
 )
 
 

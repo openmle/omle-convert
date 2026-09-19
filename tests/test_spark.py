@@ -945,16 +945,16 @@ class TestIntegration:
 # ── Runtime numerical verification ────────────────────────────────────────────
 
 class TestRuntimeVerification:
-    """End-to-end numerical checks: omle-convert → omleruntime vs Spark predictions."""
+    """End-to-end numerical checks: omle-convert → omle_runtime vs Spark predictions."""
 
     @staticmethod
     def _load_runtime(ir):
         try:
-            import omleruntime as omr
+            import omle_runtime as omr
 
             from omle.proto.convert import ir_to_proto
         except ImportError:
-            pytest.skip("omleruntime not available")
+            pytest.skip("omle_runtime not available")
         return omr.load_bytes(ir_to_proto(ir).SerializeToString())
 
     @staticmethod
