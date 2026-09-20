@@ -25,26 +25,30 @@ except ImportError:
     _HAS_PYSPARK = False
 
 if _HAS_PYSPARK:
-    _RUNTIME_ROOT = Path(__file__).resolve().parent.parent.parent / "omle-runtime"
-    _SPARK_JAR = next(
-        iter(p for p in (_RUNTIME_ROOT / "spark" / "target").glob("scala-*/omle-spark_*.jar")
-             if not p.name.endswith(("-javadoc.jar", "-sources.jar")))
-        if (_RUNTIME_ROOT / "spark" / "target").exists() else iter([]),
-        None,
-    )
-    _NATIVE_LIB = _RUNTIME_ROOT / "python" / "omle_runtime"
-    _RUNTIME_JAR = _RUNTIME_ROOT / "java" / "target" / "omle-runtime-0.1.0.jar"
-    _JNA_JAR = next(
-        iter(
-            list(Path.home().glob("Library/Caches/Coursier/**/jna/jna/*/jna-[0-9]*.jar")) or
-            list(Path.home().glob(".ivy2/**/net.java.dev.jna/jna/*/jars/jna-*.jar"))
-        ),
-        None,
-    )
-    _HAS_OMLE_SPARK = (
-        _SPARK_JAR is not None and
-        (_RUNTIME_ROOT / "spark" / "python" / "omle" / "spark" / "ml.py").exists()
-    )
+    # The omle-spark wheel ships every JAR the JVM side needs — the Scala
+    # transformer for both Scala versions, the omle-runtime JAR carrying the
+    # native library per platform, and JNA — and picks the pair matching the
+    # installed PySpark. Asking it beats rediscovering them here, which is what
+    # this used to do and got wrong three ways: the runtime JAR was pinned to a
+    # literal `omle-runtime-0.1.0.jar` that no build produces, the JNA search
+    # covered only macOS cache layouts, and the availability check tested for
+    # `spark/python/omle/spark/ml.py` — the path before the package was renamed
+    # to omle_spark — so it had been silently False ever since.
+    try:
+        import omle_spark
+        _OMLE_SPARK_JARS = [Path(j) for j in omle_spark.jars()]
+    except Exception:
+        _OMLE_SPARK_JARS = []
+    _HAS_OMLE_SPARK = bool(_OMLE_SPARK_JARS)
+
+    # Only needed when the bundled omle-runtime JAR carries no native library
+    # (a wheel built from a plain `mvn package`). A released wheel has them, and
+    # JNA extracts the right one from the classpath, so this is a dev fallback.
+    try:
+        import omle_runtime as _omr
+        _NATIVE_LIB = Path(_omr.__file__).parent
+    except ImportError:
+        _NATIVE_LIB = None
 
     def _find_xgboost4j_spark_jar():
         """Locate the xgboost4j-spark JAR matching the installed xgboost Python version.
@@ -235,9 +239,7 @@ if _HAS_PYSPARK:
         # Collect all extra JARs that are present.
         _extra_jars = [
             j for j in [
-                _SPARK_JAR if _HAS_OMLE_SPARK else None,
-                _RUNTIME_JAR if _HAS_OMLE_SPARK else None,
-                _JNA_JAR if _HAS_OMLE_SPARK else None,
+                *(_OMLE_SPARK_JARS if _HAS_OMLE_SPARK else []),
                 _XGBOOST4J_JAR,
                 _SYNAPSEML_JAR if isinstance(_SYNAPSEML_JAR, Path) else None,
             ] if j is not None
@@ -258,11 +260,10 @@ if _HAS_PYSPARK:
                 " --add-opens=java.base/java.lang.invoke=ALL-UNNAMED"
                 " --add-opens=java.base/java.util=ALL-UNNAMED"
             )
+            _jna_path = f"-Djna.library.path={_NATIVE_LIB}" if _NATIVE_LIB else ""
             builder = (builder
-                .config("spark.driver.extraJavaOptions",
-                        f"-Djna.library.path={_NATIVE_LIB}" + _open_mods)
-                .config("spark.executor.extraJavaOptions",
-                        f"-Djna.library.path={_NATIVE_LIB}" + _open_mods))
+                .config("spark.driver.extraJavaOptions", _jna_path + _open_mods)
+                .config("spark.executor.extraJavaOptions", _jna_path + _open_mods))
         session = builder.getOrCreate()
         session.sparkContext.setLogLevel("ERROR")
         yield session

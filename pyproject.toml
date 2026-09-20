@@ -81,7 +81,7 @@ dev = [
     # omle_spark layout exists this fails to resolve, which is the intended
     # outcome — installing rc4 would break the suite in a way that looks like a
     # bug in omle itself.
-    "omle-spark>0.1.0rc4",
+    "omle-spark>0.1.0rc7",
 ]
 
 [tool.ruff]
