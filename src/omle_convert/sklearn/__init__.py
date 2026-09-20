@@ -62,6 +62,7 @@ import omle
 from .._common import (
     TaskType,
     _df_uniform_dtype,
+    _is_str_dtype,
     make_auxiliary_data,
     make_input_spec,
     make_input_specs,
@@ -201,7 +202,10 @@ def from_sklearn(
     # can choose StringHStack vs Concat for each group.
     if _df is not None:
         for col in _df.columns:
-            if _df[col].dtype == object or str(_df[col].dtype).startswith("string"):
+            # Not `dtype == object or str(dtype).startswith("string")`: pandas
+            # 3.0 reports a string column's dtype as `str`, which satisfies
+            # neither test, and the column would then be treated as numeric.
+            if _is_str_dtype(_df[col].dtype):
                 builder.str_columns.add(str(col))
 
     # Chain preprocessing nodes: X → ... → pre_out

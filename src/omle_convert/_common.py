@@ -75,12 +75,12 @@ def _is_string_categorical(series) -> bool:
     """Return True if *series* holds string/object categories that need integer encoding."""
     import pandas as pd
     dtype = series.dtype
-    if pd.api.types.is_object_dtype(dtype):
+    if _is_str_dtype(dtype):
         return True
     if isinstance(dtype, pd.CategoricalDtype):
         if dtype.categories is None:
             return True  # unknown; assume strings
-        return (pd.api.types.is_object_dtype(dtype.categories.dtype) or
+        return (_is_str_dtype(dtype.categories.dtype) or
                 pd.api.types.is_string_dtype(dtype.categories.dtype))
     return False
 
@@ -121,7 +121,7 @@ def _col_series_info(series) -> tuple[omle.DataType, omle.MeasureLevel, Optional
             cats = sorted(series.dropna().unique(), key=str)
             data_type = omle.DataType.STRING
         return data_type, measure, _make_discrete_domain(cats)
-    if pd.api.types.is_object_dtype(dtype):
+    if _is_str_dtype(dtype):
         cats = sorted(str(v) for v in series.dropna().unique())
         return omle.DataType.STRING, omle.MeasureLevel.NOMINAL, _make_discrete_domain(cats)
     return omle.DataType.FLOAT64, omle.MeasureLevel.CONTINUOUS, None
