@@ -2180,8 +2180,8 @@ class TestJsonRoundtrip:
 
 # ── Prediction match: Spark native vs omle-spark runtime ──────────────────
 #
-# Requires the omle-spark JAR (run `sbt package` in omle-runtime/spark).
-# Automatically skipped when the JAR is not present.
+# Requires the omle-spark JAR, which the omle-spark wheel ships
+# (pip install omle-spark). Automatically skipped when it is not present.
 
 @skip_no_omle_spark
 class TestPredictionMatch:
