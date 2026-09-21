@@ -1,4 +1,7 @@
-# omle-convert
+# OMLE Convert
+
+[![PyPI](https://img.shields.io/pypi/v/omle-convert.svg)](https://pypi.org/project/omle-convert/)
+[![Tests](https://github.com/openmle/omle-convert/actions/workflows/test.yml/badge.svg)](https://github.com/openmle/omle-convert/actions/workflows/test.yml)
 
 Convert trained ML models and pipelines from scikit-learn, Spark ML, XGBoost, LightGBM, and CatBoost into the OMLE interchange format (`.omle`).
 
