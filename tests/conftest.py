@@ -276,6 +276,18 @@ _CONVERTERS = [
     ("omle_convert.sklearn",   ["from_sklearn"]),
     ("omle_convert.pmml",      ["from_pmml", "from_pmml_string"]),
     ("omle_convert.spark",     ["from_spark", "from_spark_live"]),
+    # omle_convert/__init__.py does `from omle_convert.sklearn import from_sklearn`
+    # at import time, and _convert_object calls those bare names. Patching only
+    # the defining modules above leaves those copies untouched, so every
+    # to_omle / export_omle conversion bypassed the callbacks entirely. Wrap the
+    # re-exported copies too; the depth counter keeps the export to one per call.
+    ("omle_convert", [
+        "from_catboost", "from_catboost_file",
+        "from_lightgbm", "from_lightgbm_text",
+        "from_sklearn",
+        "from_spark", "from_spark_live",
+        "from_xgboost", "from_xgboost_json",
+    ]),
 ]
 
 _TESTS_DIR = os.path.dirname(os.path.abspath(__file__))

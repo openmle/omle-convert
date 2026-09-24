@@ -5462,3 +5462,118 @@ class TestOneClassSVMAnomaly:
         assert ad.mode.name == "NOVELTY_DETECTION"
         assert ad.raw_score_polarity.name == "LOWER_MORE_ABNORMAL"
         assert ad.threshold is not None
+
+
+class TestIsolationForestAnomaly:
+    """IsolationForest → AnomalyDetection.isolation_forest."""
+
+    def _node(self, estimator, X):
+        m = from_sklearn(estimator, X=X)
+        node = next(n for n in m.nodes if n.op == "AnomalyDetection")
+        assert node.domain == "omle.ml"
+        return node, m
+
+    def test_body_is_isolation_forest(self, regression_data):
+        from sklearn.ensemble import IsolationForest
+        X, _ = regression_data
+        est = IsolationForest(n_estimators=10, random_state=0).fit(X)
+        node, _ = self._node(est, X)
+
+        forest = node.anomaly_detection.isolation_forest
+        assert forest is not None
+        assert len(forest.trees) == len(est.estimators_)
+        assert forest.max_samples == int(est.max_samples_)
+        assert forest.offset.double_value == pytest.approx(float(est.offset_))
+
+    def test_metadata_is_outlier_detection(self, regression_data):
+        from sklearn.ensemble import IsolationForest
+        X, _ = regression_data
+        node, _ = self._node(IsolationForest(n_estimators=5, random_state=0).fit(X), X)
+        ad = node.anomaly_detection
+        assert ad.task_type.name == "ANOMALY_DETECTION"
+        # IsolationForest is fitted on data that may already contain outliers.
+        assert ad.mode.name == "OUTLIER_DETECTION"
+        assert ad.raw_score_polarity.name == "LOWER_MORE_ABNORMAL"
+
+    def test_runtime_matches_native(self, regression_data):
+        from sklearn.ensemble import IsolationForest
+        X, _ = regression_data
+        est = IsolationForest(n_estimators=10, random_state=0).fit(X)
+        m = _load_runtime(from_sklearn(est, X=X))
+        # The node's single output is the raw score, i.e. sklearn score_samples.
+        np.testing.assert_allclose(
+            np.asarray(m.predict(X)).ravel(), est.score_samples(X), rtol=1e-6, atol=1e-6)
+
+
+class TestLocalOutlierFactorAnomaly:
+    """LocalOutlierFactor(novelty=True) → AnomalyDetection.local_outlier_factor."""
+
+    def _node(self, estimator, X):
+        m = from_sklearn(estimator, X=X)
+        node = next(n for n in m.nodes if n.op == "AnomalyDetection")
+        assert node.domain == "omle.ml"
+        return node, m
+
+    def test_body_is_local_outlier_factor(self, regression_data):
+        from sklearn.neighbors import LocalOutlierFactor
+        X, _ = regression_data
+        est = LocalOutlierFactor(n_neighbors=10, novelty=True).fit(X)
+        node, m = self._node(est, X)
+
+        lof = node.anomaly_detection.local_outlier_factor
+        assert lof is not None
+        assert lof.n_neighbors == int(est.n_neighbors_)
+        assert lof.metric == est.metric
+        assert lof.offset.double_value == pytest.approx(float(est.offset_))
+        samples = _tv_float64(lof.reference_samples, m)
+        assert len(samples) == est._fit_X.size
+
+    def test_transductive_fit_is_rejected(self, regression_data):
+        from sklearn.neighbors import LocalOutlierFactor
+        X, _ = regression_data
+        # novelty=False has no predict() for unseen data, so there is nothing
+        # to convert — the converter must say so rather than emit a model that
+        # scores differently from the estimator it came from.
+        est = LocalOutlierFactor(n_neighbors=10, novelty=False).fit(X)
+        with pytest.raises(NotImplementedError, match="novelty"):
+            from_sklearn(est, X=X)
+
+    def test_runtime_matches_native(self, regression_data):
+        from sklearn.neighbors import LocalOutlierFactor
+        X, _ = regression_data
+        est = LocalOutlierFactor(n_neighbors=10, novelty=True).fit(X)
+        m = _load_runtime(from_sklearn(est, X=X))
+        np.testing.assert_allclose(
+            np.asarray(m.predict(X)).ravel(), est.score_samples(X), rtol=1e-5, atol=1e-5)
+
+
+class TestEllipticEnvelopeAnomaly:
+    """EllipticEnvelope → AnomalyDetection.elliptic_envelope."""
+
+    def _node(self, estimator, X):
+        m = from_sklearn(estimator, X=X)
+        node = next(n for n in m.nodes if n.op == "AnomalyDetection")
+        assert node.domain == "omle.ml"
+        return node, m
+
+    def test_body_is_elliptic_envelope(self, regression_data):
+        from sklearn.covariance import EllipticEnvelope
+        X, _ = regression_data
+        est = EllipticEnvelope(random_state=0).fit(X)
+        node, m = self._node(est, X)
+
+        env = node.anomaly_detection.elliptic_envelope
+        assert env is not None
+        assert _tv_float64(env.location, m) == pytest.approx(est.location_.ravel().tolist())
+        assert _tv_float64(env.precision, m) == pytest.approx(est.precision_.ravel().tolist())
+        assert _tv_float64(env.covariance, m) == pytest.approx(est.covariance_.ravel().tolist())
+        assert env.offset.double_value == pytest.approx(float(est.offset_))
+
+    def test_runtime_matches_native(self, regression_data):
+        from sklearn.covariance import EllipticEnvelope
+        X, _ = regression_data
+        est = EllipticEnvelope(random_state=0).fit(X)
+        m = _load_runtime(from_sklearn(est, X=X))
+        # score_samples = -mahalanobis(x); the body stores the precision matrix.
+        np.testing.assert_allclose(
+            np.asarray(m.predict(X)).ravel(), est.score_samples(X), rtol=1e-6, atol=1e-6)

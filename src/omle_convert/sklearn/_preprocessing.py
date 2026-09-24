@@ -186,18 +186,78 @@ def _binarizer(t, input_name, prefix, builder):
 
 # ── Encoders ──────────────────────────────────────────────────────────────────
 
-def _ohe(t, input_name, prefix, builder):
-    """OneHotEncoder: single node with concatenated category vocab and offset index."""
-    all_cats = [str(c) for cats in t.categories_ for c in cats]
+def _cats_are_strings(cats) -> bool:
+    """True when a feature's fitted categories are strings rather than numbers."""
+    return getattr(cats, "dtype", None) is None or cats.dtype.kind in "OUSa"
+
+
+def _ohe_group(t_cats, input_names, prefix, builder, suffix):
+    """Emit one OneHotEncoder node over features that share a category dtype."""
     offsets = [0]
-    for cats in t.categories_:
+    for cats in t_cats:
         offsets.append(offsets[-1] + len(cats))
-    n_out = sum(len(cats) for cats in t.categories_)
-    out = builder.unique_name(f"{prefix}_ohe")
-    return _feature_node("OneHotEncoder", input_name, out, [
-        builder.string_tensor_attr("categories",       f"{prefix}_cats",        all_cats),
-        builder.int_tensor_attr(   "category_offsets", f"{prefix}_cat_offsets", np.array(offsets, dtype=np.int64)),
-    ], builder, output_type=out_type(n_out))
+    n_out = offsets[-1]
+    out = builder.unique_name(f"{prefix}_ohe{suffix}")
+
+    if _cats_are_strings(t_cats[0]):
+        cats_attr = builder.string_tensor_attr(
+            "categories", f"{prefix}_cats{suffix}",
+            [str(c) for cats in t_cats for c in cats])
+    else:
+        flat = np.concatenate([np.asarray(c) for c in t_cats])
+        # Keep the fitted dtype: the runtime matches a numeric input against
+        # numeric categories by value, and stringifying would force it down the
+        # string path with an input it cannot compare.
+        cats_attr = (builder.int_tensor_attr if flat.dtype.kind in "iu"
+                     else builder.tensor_attr)(
+            "categories", f"{prefix}_cats{suffix}", flat)
+
+    return _feature_node("OneHotEncoder", input_names, out, [
+        cats_attr,
+        builder.int_tensor_attr("category_offsets", f"{prefix}_cat_offsets{suffix}",
+                                np.array(offsets, dtype=np.int64)),
+    ], builder, output_type=out_type(n_out)), n_out
+
+
+def _ohe(t, input_name, prefix, builder):
+    """OneHotEncoder → one node per run of features sharing a category dtype.
+
+    The operator spec gives ``categories`` as a single rank-1 tensor holding the
+    concatenated vocabulary for every input, so one node can carry only one
+    category dtype. sklearn keeps ``categories_`` per feature and they need not
+    agree — ``['f','m']`` beside ``[1, 2, 3]``. Emitting one stringified tensor
+    for all of them left integer columns declared against string categories,
+    which the runtime cannot match.
+
+    Features are split into *contiguous* runs rather than grouped globally:
+    output column order follows feature order, and grouping would reorder the
+    columns whenever dtypes interleave.
+    """
+    names = input_name if isinstance(input_name, list) else None
+    if names is None or len(t.categories_) < 2:
+        # One tensor for every column, or a single feature: nothing to split.
+        return _ohe_group(list(t.categories_), input_name, prefix, builder, "")[0]
+
+    runs: list[tuple[list, list[str]]] = []
+    for cats, name in zip(t.categories_, names, strict=True):
+        is_str = _cats_are_strings(cats)
+        if runs and _cats_are_strings(runs[-1][0][0]) == is_str:
+            runs[-1][0].append(cats)
+            runs[-1][1].append(name)
+        else:
+            runs.append(([cats], [name]))
+
+    if len(runs) == 1:
+        return _ohe_group(runs[0][0], runs[0][1], prefix, builder, "")[0]
+
+    outs, widths = [], 0
+    for i, (cats_run, names_run) in enumerate(runs):
+        out_i, n_i = _ohe_group(cats_run, names_run, prefix, builder, f"_{i}")
+        outs.append(out_i)
+        widths += n_i
+    concat = builder.unique_name(f"{prefix}_ohe")
+    _core_node("Concat", outs, concat, [], builder, output_type=out_type(widths))
+    return concat
 
 
 def _ordinal_encoder(t, input_name, prefix, builder):
