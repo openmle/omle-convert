@@ -41,14 +41,44 @@ if _HAS_PYSPARK:
         _OMLE_SPARK_JARS = []
     _HAS_OMLE_SPARK = bool(_OMLE_SPARK_JARS)
 
-    # Only needed when the bundled omle-runtime JAR carries no native library
-    # (a wheel built from a plain `mvn package`). A released wheel has them, and
-    # JNA extracts the right one from the classpath, so this is a dev fallback.
-    try:
-        import omle_runtime as _omr
-        _NATIVE_LIB = Path(_omr.__file__).parent
-    except ImportError:
-        _NATIVE_LIB = None
+    def _native_lib_fallback():
+        """Directory holding a locally built libomleruntime, or None.
+
+        Only needed when the bundled omle-runtime JAR carries no native library
+        — a wheel built from a plain `mvn package`. A released wheel has them
+        and JNA extracts the matching one from the classpath.
+
+        The check matters. Setting jna.library.path unconditionally silently
+        pairs a locally built native with whatever omle-runtime version
+        omle-spark pins, and the two need not agree on the C ABI. That is not
+        hypothetical: OMLE_COL_STRING moved from 1 to 2 when FLOAT64 support
+        landed, so an rc9 JAR sending 1 for a string column had its char*
+        array read as double* by a freshly built native. Every row decoded to
+        category index 0, and a OneHotEncoder pipeline silently predicted as
+        though every row held the first category — no error, just wrong
+        numbers, visible only where a decision boundary happened to sit.
+        """
+        try:
+            import omle_spark as _osp
+        except ImportError:
+            return None
+        import zipfile
+        for _jar in _OMLE_SPARK_JARS:
+            if not os.path.basename(_jar).startswith("omle-runtime-"):
+                continue
+            try:
+                _names = zipfile.ZipFile(_jar).namelist()
+            except Exception:
+                continue
+            if any(n.endswith((".so", ".dylib", ".dll")) for n in _names):
+                return None  # the JAR is self-sufficient; do not override it
+        try:
+            import omle_runtime as _omr
+            return Path(_omr.__file__).parent
+        except ImportError:
+            return None
+
+    _NATIVE_LIB = _native_lib_fallback()
 
     def _find_xgboost4j_spark_jar():
         """Locate the xgboost4j-spark JAR matching the installed xgboost Python version.
