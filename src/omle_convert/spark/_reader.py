@@ -117,16 +117,71 @@ def _cls_to_snake(cls: str) -> str:
     return _re.sub(r'([a-z\d])([A-Z])', r'\1_\2', s).lower()
 
 
+def _column_of(data: dict, want: type) -> Optional[list]:
+    """First column whose values are all of `want`.
+
+    Used to read a frame Spark saved without column names, where the fields
+    arrive as _1/_2/_3 and only their types distinguish them.
+    """
+    for values in data.values():
+        if not values:
+            continue
+        # bool is a subclass of int, so exclude it explicitly rather than let a
+        # boolean column masquerade as the tree id.
+        if want is int and all(isinstance(v, int) and not isinstance(v, bool)
+                               for v in values):
+            return list(values)
+        if want is float and all(isinstance(v, float) for v in values):
+            return list(values)
+    return None
+
+
 def _read_gbt_tree_weights(path: str) -> List[float]:
-    """Read per-tree weights from treesMetadata/ parquet (GBT regressor / classifier)."""
+    """Read per-tree weights from treesMetadata/ parquet (GBT regressor / classifier).
+
+    These are the step sizes Spark scales each tree by — (1.0, lr, lr, ...) —
+    so dropping them does not degrade the model, it changes it: every tree after
+    the first counts about ten times too much.
+
+    Spark does not always name the columns of this frame. Spark 4.x writes it
+    from an unnamed tuple, so the fields come back as _1/_2/_3 and a lookup by
+    name finds nothing. Match on name first, then fall back to picking the
+    columns out by type.
+    """
     trees_meta_dir = os.path.join(path, "treesMetadata")
     if not os.path.isdir(trees_meta_dir):
         return []
     data = _read_parquet_dict(path, subdir="treesMetadata")
-    if "treeID" not in data or "weights" not in data:
+
+    ids = data.get("treeID")
+    weights = data.get("weights")
+    if ids is None or weights is None:
+        ids = _column_of(data, int)
+        weights = _column_of(data, float)
+    if ids is None or weights is None:
         return []
-    pairs = sorted(zip(data["treeID"], data["weights"], strict=True))
+
+    pairs = sorted(zip(ids, weights, strict=True))
     return [float(w) for _, w in pairs]
+
+
+def _gbt_weights_or_fail(path: str, meta: dict, n_trees: int, what: str) -> List[float]:
+    """Per-tree weights for a GBT, or a clear error.
+
+    Defaulting a missing weight to 1.0 is never right for a GBT: only the first
+    tree has weight 1.0 and the rest carry the learning rate. Silently doing it
+    produced a model that loaded, scored, and was wrong by a factor of ten on
+    every tree but the first.
+    """
+    weights = _read_gbt_tree_weights(path) or list(meta.get("treeWeights", []))
+    if len(weights) < n_trees:
+        raise ValueError(
+            f"{what}: found {len(weights)} tree weights for {n_trees} trees. "
+            "Spark stores them in treesMetadata/; without them every tree after "
+            "the first would be scaled wrongly. This usually means an "
+            "unrecognised layout — please report the Spark version."
+        )
+    return [float(w) for w in weights]
 
 
 # ── Spark type decoders ────────────────────────────────────────────────────────
@@ -747,13 +802,13 @@ def _load_gbt_classifier(path, input_name, builder, meta):
     builder.n_classes = 2
     if meta.get("numFeatures") and builder.n_features < 0:
         builder.n_features = int(meta["numFeatures"])
-    weights   = _read_gbt_tree_weights(path) or meta.get("treeWeights", [])
     data      = _read_parquet_dict(path)
     tree_dict = _group_by_tree(data)
+    weights   = _gbt_weights_or_fail(path, meta, len(tree_dict), "GBTClassifier")
     # Spark binary GBT converts raw score F → P via sigmoid(2*F); multiply weights by 2
     # so the runtime's sigmoid(sum) matches Spark's sigmoid(2*sum).
     trees = [
-        _build_tree(tree_dict[i], _gbt_leaf(2.0 * (float(weights[i]) if i < len(weights) else 1.0)), builder)
+        _build_tree(tree_dict[i], _gbt_leaf(2.0 * weights[i]), builder)
         for i in sorted(tree_dict)
     ]
     ensemble = TreeEnsemble(
@@ -766,11 +821,11 @@ def _load_gbt_classifier(path, input_name, builder, meta):
 def _load_gbt_regressor(path, input_name, builder, meta):
     if meta.get("numFeatures") and builder.n_features < 0:
         builder.n_features = int(meta["numFeatures"])
-    weights   = _read_gbt_tree_weights(path) or meta.get("treeWeights", [])
     data      = _read_parquet_dict(path)
     tree_dict = _group_by_tree(data)
+    weights   = _gbt_weights_or_fail(path, meta, len(tree_dict), "GBTRegressor")
     trees = [
-        _build_tree(tree_dict[i], _gbt_leaf(float(weights[i]) if i < len(weights) else 1.0), builder)
+        _build_tree(tree_dict[i], _gbt_leaf(weights[i]), builder)
         for i in sorted(tree_dict)
     ]
     ensemble = TreeEnsemble(task_type=TaskType.REGRESSION, trees=trees, aggregation=TreeAggregation.SUM)

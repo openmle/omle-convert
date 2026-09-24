@@ -70,6 +70,8 @@
 | `IsolationForest` | Anomaly detection | `AnomalyDetection` (IsolationForest) | Each `ExtraTreeRegressor` converted to a `Tree`; leaf values precomputed as `depth + c(n_samples)` so the runtime averages path lengths directly; `max_samples_` and `offset_` stored |
 | `LocalOutlierFactor` (`novelty=True`) | Anomaly detection | `AnomalyDetection` (LocalOutlierFactor) | Training data stored as `reference_samples`; `n_neighbors`, `metric`, `metric_params`, and `offset_` stored; requires `novelty=True` |
 | `EllipticEnvelope` | Anomaly detection | `AnomalyDetection` (EllipticEnvelope) | `location_`, `covariance_`, `precision_`, and `offset_` stored |
+| `OneClassSVM` | Anomaly detection | `AnomalyDetection` (OneClassSVM) | `support_vectors_`, `dual_coef_`, kernel and its `_gamma`/`degree`/`coef0` stored. No intercept is written: sklearn sets `offset_ = -intercept_`, so `score_samples` is the plain kernel sum and the intercept stays recoverable as `-offset`. `kernel='precomputed'` is rejected |
+| `SGDOneClassSVM` | Anomaly detection | `AnomalyDetection` (LinearOneClassSVM) | `coef_` stored as the linear coefficients with `offset_` kept separately, matching sklearn's `score_samples(X) = X @ coef_` and `decision_function = score_samples - offset_` |
 
 ## Feature dtypes
 

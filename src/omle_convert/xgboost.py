@@ -35,7 +35,8 @@ from omle.ir.enums import (
     TreeNodeKind,
     TreeSplitOp,
 )
-from omle.ir.types import Scalar
+from omle.ir.tensor import Tensor
+from omle.ir.types import TensorValue
 
 from ._common import (
     TaskType,
@@ -228,8 +229,8 @@ def from_xgboost(
 
     xgb_version = _xgb_version()
     trees, tree_group = _convert_trees(booster, feat_index, n_classes, task, tensor_entries)
-    base_score = _base_score(tree_model, booster)
-    ensemble = _make_ensemble(trees, tree_group, task, base_score)
+    base_scores = _base_scores(tree_model, booster)
+    ensemble = _make_ensemble(trees, tree_group, task, base_scores)
 
     ensemble_node = omle.Node(
         name=_estimator_node_name(tree_model),
@@ -410,32 +411,57 @@ def _xgb_version() -> str:
         return "unknown"
 
 
-def _base_score(model, booster) -> Optional[float]:
-    # sklearn API
+def _base_scores(model, booster) -> Optional[list[float]]:
+    """Intercepts fitted by the booster, one per output.
+
+    Returns a single-element list for regression and binary, and one entry per
+    class for multiclass. None when the booster reports no intercept at all.
+    """
+    # sklearn API. Set explicitly by the caller, so always a single value.
     bs = getattr(model, "base_score", None)
     if bs is not None:
         try:
-            return float(bs)
+            return [float(bs)]
         except (TypeError, ValueError):
             pass
-    # parse from booster config
+    # Otherwise read what the booster actually fitted.
     try:
         cfg = json.loads(booster.save_config())
         raw = (cfg.get("learner", {})
                   .get("learner_model_param", {})
                   .get("base_score"))
         if raw is not None:
-            return float(raw)
+            return _parse_base_scores(raw)
     except Exception:
         pass
     return None
+
+
+def _parse_base_scores(raw) -> Optional[list[float]]:
+    """Parse the base_score reported by booster.save_config().
+
+    XGBoost < 2.0 reported a bare scalar ("5E-1"). Since 2.0 the intercept is
+    fitted rather than fixed, and save_config() renders it as a JSON array in a
+    string: "[2.0719469E0]" for a single output, or one entry per class for
+    multiclass. float() rejects the bracketed form, and because the caller
+    wraps this in a bare except the failure was silent — the model converted
+    cleanly and simply predicted every row low by the intercept.
+    """
+    if isinstance(raw, (int, float)):
+        return [float(raw)]
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if raw.startswith("["):
+            return [float(v) for v in json.loads(raw)]
+        return [float(raw)]
+    raise TypeError(f"unsupported base_score type: {type(raw).__name__}")
 
 
 def _make_ensemble(
     trees: list[Tree],
     tree_group: list[int],
     task: TaskType,
-    base_score: Optional[float],
+    base_scores: Optional[list[float]],
 ) -> TreeEnsemble:
     post = {
         TaskType.REGRESSION:  PostTransform.POST_TRANSFORM_UNSPECIFIED,
@@ -443,21 +469,24 @@ def _make_ensemble(
         TaskType.MULTICLASS:  PostTransform.SOFTMAX,
     }[task]
 
-    # XGBoost 2.x stores base_score in output space (probability) for
-    # classification objectives. Convert to margin space so the runtime
-    # can add it directly to raw tree sums before applying post_transform.
-    margin_base_score = base_score
-    if base_score is not None and task == TaskType.BINARY:
-        # Clamp to valid probability range before logit to avoid log(0)
-        p = max(1e-7, min(1.0 - 1e-7, base_score))
-        margin_base_score = math.log(p / (1.0 - p))
+    # XGBoost reports the binary intercept in output space (a probability), so
+    # it is converted to margin space and the runtime can add it straight to the
+    # raw tree sum before post_transform. Multiclass intercepts are already in
+    # margin space — they are signed and sum to roughly zero — and regression
+    # has no transform, so both pass through unchanged.
+    margin = base_scores
+    if base_scores is not None and task == TaskType.BINARY:
+        # Clamp to a valid probability before the logit, to avoid log(0).
+        margin = [math.log(p / (1.0 - p))
+                  for p in (max(1e-7, min(1.0 - 1e-7, b)) for b in base_scores)]
 
     return TreeEnsemble(
         task_type=task,
         trees=trees,
         aggregation=TreeAggregation.SUM,
         post_transform=post,
-        base_score=Scalar(float_value=margin_base_score) if margin_base_score is not None else None,
+        base_scores=(TensorValue.of_tensor(Tensor(float64_data=list(margin)))
+                     if margin is not None else None),
         tree_group=tree_group,
     )
 

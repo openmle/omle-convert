@@ -1,4 +1,8 @@
-"""sklearn anomaly detection → OMLE: IsolationForest, LocalOutlierFactor, EllipticEnvelope."""
+"""sklearn anomaly detection → OMLE.
+
+IsolationForest, LocalOutlierFactor, EllipticEnvelope, OneClassSVM and
+SGDOneClassSVM.
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -15,11 +19,21 @@ from omle.ir.bodies import (
     IsolationForest as IRIsolationForest,
 )
 from omle.ir.bodies import (
+    KernelSVM as IRKernelSVM,
+)
+from omle.ir.bodies import (
+    LinearOneClassSVM as IRLinearOneClassSVM,
+)
+from omle.ir.bodies import (
     LocalOutlierFactor as IRLocalOutlierFactor,
+)
+from omle.ir.bodies import (
+    OneClassSVM as IROneClassSVM,
 )
 from omle.ir.enums import (
     DetectionMode,
     ScorePolarity,
+    SVMKernelType,
     TreeNodeKind,
     TreeSplitOp,
 )
@@ -31,7 +45,15 @@ from ._trees import _TREE_LEAF
 
 _ANOMALY_DETECTION_CLASSES: frozenset[str] = frozenset({
     "IsolationForest", "LocalOutlierFactor", "EllipticEnvelope",
+    "OneClassSVM", "SGDOneClassSVM",
 })
+
+_SVM_KERNELS = {
+    "linear": SVMKernelType.LINEAR,
+    "poly": SVMKernelType.POLY,
+    "rbf": SVMKernelType.RBF,
+    "sigmoid": SVMKernelType.SIGMOID,
+}
 
 
 def _avg_path_length(n: int) -> float:
@@ -229,6 +251,95 @@ def _convert_elliptic_envelope(estimator, input_name, builder: Builder) -> None:
     ))
 
 
+def _convert_one_class_svm(estimator, input_name, builder: Builder) -> None:
+    """sklearn.svm.OneClassSVM → AnomalyDetection.one_class_svm.
+
+    The body is lowered so that evaluating it directly yields sklearn's
+    ``score_samples``, matching every other anomaly body. sklearn defines
+
+        decision_function(X) = dual_coef_ @ K(SV, X) + intercept_
+        score_samples(X)     = decision_function(X) + offset_
+
+    and sets ``offset_ = -intercept_``, so ``score_samples`` is exactly the
+    kernel sum with no intercept term. The intercept is therefore left unset
+    rather than written as a value the body would have to cancel again; it
+    stays recoverable as ``-offset``, and ``decision_function`` as
+    ``score - offset``.
+    """
+    kernel = str(getattr(estimator, "kernel", "rbf"))
+    if kernel not in _SVM_KERNELS:
+        raise NotImplementedError(
+            f"OneClassSVM with kernel={kernel!r} is not supported; "
+            f"supported kernels are {sorted(_SVM_KERNELS)}."
+        )
+
+    support_vectors = np.asarray(estimator.support_vectors_, dtype=np.float64)
+    dual_coef = np.asarray(estimator.dual_coef_, dtype=np.float64).ravel()
+    offset = Scalar(double_value=float(np.ravel(estimator.offset_)[0]))
+
+    kernel_svm = IRKernelSVM(
+        kernel_type=_SVM_KERNELS[kernel],
+        support_vectors=builder.body_tensor_value(
+            "ocsvm_support_vectors", support_vectors),
+        dual_coefficients=builder.body_tensor_value(
+            "ocsvm_dual_coefficients", dual_coef),
+        gamma=Scalar(double_value=float(estimator._gamma)),
+        degree=int(getattr(estimator, "degree", 3)),
+        coef0=Scalar(double_value=float(getattr(estimator, "coef0", 0.0))),
+        n_support=[int(n) for n in np.ravel(estimator.n_support_)]
+        if hasattr(estimator, "n_support_") else [],
+    )
+
+    builder.add_node(omle.Node(
+        name="anomaly_detection",
+        domain="omle.ml",
+        op="AnomalyDetection",
+        inputs=_node_inputs(input_name),
+        outputs=[omle.NodeOutput(name="anomaly_score", role=omle.OutputRole.SCORE,
+                                    type=omle.TensorType(dtype=omle.DataType.FLOAT64, shape=[-1]))],
+        anomaly_detection=AnomalyDetection(
+            task_type=IRTaskType.ANOMALY_DETECTION,
+            mode=DetectionMode.NOVELTY_DETECTION,
+            raw_score_polarity=ScorePolarity.LOWER_MORE_ABNORMAL,
+            threshold=offset,
+            one_class_svm=IROneClassSVM(
+                kernel_svm=kernel_svm,
+                offset=offset,
+            ),
+        ),
+    ))
+
+
+def _convert_sgd_one_class_svm(estimator, input_name, builder: Builder) -> None:
+    """sklearn.linear_model.SGDOneClassSVM → AnomalyDetection.linear_one_class_svm.
+
+    sklearn computes ``score_samples(X) = X @ coef_`` and
+    ``decision_function(X) = score_samples(X) - offset_``, so the linear body
+    carries the coefficients with no intercept and the offset separately.
+    """
+    coef = np.asarray(estimator.coef_, dtype=np.float64).ravel()
+    offset = Scalar(double_value=float(np.ravel(estimator.offset_)[0]))
+
+    builder.add_node(omle.Node(
+        name="anomaly_detection",
+        domain="omle.ml",
+        op="AnomalyDetection",
+        inputs=_node_inputs(input_name),
+        outputs=[omle.NodeOutput(name="anomaly_score", role=omle.OutputRole.SCORE,
+                                    type=omle.TensorType(dtype=omle.DataType.FLOAT64, shape=[-1]))],
+        anomaly_detection=AnomalyDetection(
+            task_type=IRTaskType.ANOMALY_DETECTION,
+            mode=DetectionMode.NOVELTY_DETECTION,
+            raw_score_polarity=ScorePolarity.LOWER_MORE_ABNORMAL,
+            threshold=offset,
+            linear_one_class_svm=IRLinearOneClassSVM(
+                coefficients=builder.body_tensor_value("sgd_ocsvm_coefficients", coef),
+                offset=offset,
+            ),
+        ),
+    ))
+
+
 def _convert_anomaly_detection(estimator, input_name, builder: Builder) -> None:
     cls_name = type(estimator).__name__
     if cls_name == "IsolationForest":
@@ -237,5 +348,9 @@ def _convert_anomaly_detection(estimator, input_name, builder: Builder) -> None:
         _convert_local_outlier_factor(estimator, input_name, builder)
     elif cls_name == "EllipticEnvelope":
         _convert_elliptic_envelope(estimator, input_name, builder)
+    elif cls_name == "OneClassSVM":
+        _convert_one_class_svm(estimator, input_name, builder)
+    elif cls_name == "SGDOneClassSVM":
+        _convert_sgd_one_class_svm(estimator, input_name, builder)
     else:
         raise NotImplementedError(f"Unsupported anomaly detection estimator: {cls_name}")

@@ -24,43 +24,48 @@ except ImportError:
 pytestmark = pytest.mark.skipif(not HAS_PYSPARK, reason="pyspark not installed")
 
 import os
+import re
 import tempfile
 from pathlib import Path
 
 import omle
 from omle_convert.spark import from_spark_live
 
-# ── omle-spark JAR detection (for runtime prediction-match tests) ───────────
+# ── omle-spark availability (for runtime prediction-match tests) ───────────
+#
+# The omle-spark wheel ships the JARs the JVM side needs and selects the ones
+# matching the installed PySpark, so there is nothing to discover here. conftest
+# puts them on the Spark class-path; this module only needs to know whether they
+# are there.
+#
+# This replaced a hand-rolled search of a sibling omle-runtime checkout, which
+# meant the tests only ran for someone who had built the Scala JAR with
+# `sbt +package` — never in CI, where all 22 of them skipped.
+try:
+    import omle_spark
+    from omle_spark import OMLEModel as _OMLEModel
 
-_RUNTIME_ROOT = Path(__file__).resolve().parent.parent.parent / "omle-runtime"
-_SPARK_JAR_GLOB = [
-    p for p in (_RUNTIME_ROOT / "spark" / "target").glob("scala-*/omle-spark_*.jar")
-    if not p.name.endswith(("-javadoc.jar", "-sources.jar"))
-] if (_RUNTIME_ROOT / "spark" / "target").exists() else []
-_SPARK_JAR  = _SPARK_JAR_GLOB[0] if _SPARK_JAR_GLOB else None
-_NATIVE_LIB = _RUNTIME_ROOT / "python" / "omleruntime"
-_RUNTIME_JAR = _RUNTIME_ROOT / "java" / "target" / "omle-runtime-0.1.0.jar"
-_JNA_JAR_GLOB = (
-    list(Path.home().glob("Library/Caches/Coursier/**/jna/jna/*/jna-[0-9]*.jar")) or
-    list(Path.home().glob(".ivy2/**/net.java.dev.jna/jna/*/jars/jna-*.jar"))
-)
-_JNA_JAR = _JNA_JAR_GLOB[0] if _JNA_JAR_GLOB else None
-
-_SPARK_ML_FILE = _RUNTIME_ROOT / "spark" / "python" / "omle" / "spark" / "ml.py"
-if _SPARK_JAR is not None and _SPARK_ML_FILE.exists():
-    import importlib.util as _ilu
-    _spec = _ilu.spec_from_file_location("omle.spark.ml", _SPARK_ML_FILE)
-    _spark_ml_mod = _ilu.module_from_spec(_spec)
-    _spec.loader.exec_module(_spark_ml_mod)
-    _OMLEModel = _spark_ml_mod.OMLEModel
-    HAS_OMLE_SPARK = True
-else:
+    _OMLE_SPARK_JARS = omle_spark.jars()
+    _HAS_OMLE_SPARK_PKG = True
+except ImportError:
     _OMLEModel = None
-    HAS_OMLE_SPARK = False
+    _OMLE_SPARK_JARS = []
+    _HAS_OMLE_SPARK_PKG = False
+except Exception:
+    # Importable but shipping no usable JAR — a wheel built without
+    # stage_jars.py, or one with no build for this PySpark's Scala version.
+    _OMLEModel = None
+    _OMLE_SPARK_JARS = []
+    _HAS_OMLE_SPARK_PKG = True
+
+HAS_OMLE_SPARK = bool(_OMLE_SPARK_JARS)
 
 skip_no_omle_spark = pytest.mark.skipif(
     not HAS_OMLE_SPARK,
-    reason="omle-spark JAR not found — run `sbt package` in omle-runtime/spark",
+    reason=("omle-spark is installed but ships no JAR for this PySpark's Scala "
+            "version — see spark/scripts/stage_jars.py"
+            if _HAS_OMLE_SPARK_PKG
+            else "omle-spark not installed (pip install omle-spark)"),
 )
 
 
@@ -2175,8 +2180,8 @@ class TestJsonRoundtrip:
 
 # ── Prediction match: Spark native vs omle-spark runtime ──────────────────
 #
-# Requires the omle-spark JAR (run `sbt package` in omle-runtime/spark).
-# Automatically skipped when the JAR is not present.
+# Requires the omle-spark JAR, which the omle-spark wheel ships
+# (pip install omle-spark). Automatically skipped when it is not present.
 
 @skip_no_omle_spark
 class TestPredictionMatch:

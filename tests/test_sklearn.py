@@ -44,7 +44,7 @@ def _all_nodes(nodes):
 
 
 def _load_runtime(ir_model):
-    omr = pytest.importorskip("omleruntime", reason="omleruntime not installed")
+    omr = pytest.importorskip("omle_runtime", reason="omle_runtime not installed")
     from omle.proto.convert import ir_to_proto
     data = ir_to_proto(ir_model).SerializeToString()
     return omr.load_bytes(data)
@@ -634,7 +634,7 @@ class TestGradientBoostingRegressor:
     def test_base_score_set(self, gb_regressor):
         m = from_sklearn(gb_regressor)
         _assert_std_io(m, task="regression")
-        assert m.nodes[0].tree_ensemble.base_score is not None
+        assert m.nodes[0].tree_ensemble.base_scores is not None
 
     def test_no_tree_group(self, gb_regressor):
         m = from_sklearn(gb_regressor)
@@ -672,7 +672,7 @@ class TestGradientBoostingBinary:
     def test_base_score_set(self, gb_binary):
         m = from_sklearn(gb_binary)
         _assert_std_io(m, task="binary")
-        assert m.nodes[0].tree_ensemble.base_score is not None
+        assert m.nodes[0].tree_ensemble.base_scores is not None
 
     def test_schema_binary_target(self, gb_binary):
         m = from_sklearn(gb_binary)
@@ -763,7 +763,7 @@ class TestHistGradientBoostingRegressor:
     def test_base_score_set(self, hgb_regressor):
         m = from_sklearn(hgb_regressor)
         _assert_std_io(m, task="regression")
-        assert m.nodes[0].tree_ensemble.base_score is not None
+        assert m.nodes[0].tree_ensemble.base_scores is not None
 
     def test_schema_regression_target(self, hgb_regressor):
         m = from_sklearn(hgb_regressor)
@@ -796,7 +796,7 @@ class TestHistGradientBoostingBinary:
     def test_base_score_set(self, hgb_binary):
         m = from_sklearn(hgb_binary)
         _assert_std_io(m, task="binary")
-        assert m.nodes[0].tree_ensemble.base_score is not None
+        assert m.nodes[0].tree_ensemble.base_scores is not None
 
     def test_schema_binary_target(self, hgb_binary):
         m = from_sklearn(hgb_binary)
@@ -5383,3 +5383,197 @@ class TestSklearnDataFramePipelines:
         m = _load_runtime(_ir)
         assert np.array_equal(m.predict(df), p.predict(df))
         np.testing.assert_allclose(m.predict_proba(df), p.predict_proba(df), rtol=1e-4, atol=1e-4)
+
+
+class TestOneClassSVMAnomaly:
+    """OneClassSVM and SGDOneClassSVM → AnomalyDetection node."""
+
+    def _node(self, estimator, X):
+        m = from_sklearn(estimator, X=X)
+        node = next(n for n in m.nodes if n.op == "AnomalyDetection")
+        assert node.domain == "omle.ml"
+        return node, m
+
+    def _tensor_values(self, m, tv):
+        if tv.tensor_ref is not None:
+            entry = next(e for e in m.tensor_entries if e.id == tv.tensor_ref.id)
+            return list(entry.dense.float64_data)
+        return list(tv.tensor.float64_data)
+
+    def test_one_class_svm_rbf(self, regression_data):
+        from sklearn.svm import OneClassSVM
+        X, _ = regression_data
+        est = OneClassSVM(kernel="rbf", gamma=0.3, nu=0.2).fit(X)
+        node, m = self._node(est, X)
+
+        ocs = node.anomaly_detection.one_class_svm
+        assert ocs is not None
+        assert ocs.kernel_svm.kernel_type.name == "RBF"
+        assert ocs.kernel_svm.gamma.double_value == pytest.approx(est._gamma)
+        # score_samples is the plain kernel sum, so no intercept is stored; the
+        # offset carries it and decision_function is score - offset.
+        assert ocs.kernel_svm.intercept is None
+        assert ocs.offset.double_value == pytest.approx(float(np.ravel(est.offset_)[0]))
+
+        sv = self._tensor_values(m, ocs.kernel_svm.support_vectors)
+        assert len(sv) == est.support_vectors_.size
+        dual = self._tensor_values(m, ocs.kernel_svm.dual_coefficients)
+        assert dual == pytest.approx(est.dual_coef_.ravel().tolist())
+
+    @pytest.mark.parametrize("kernel", ["linear", "poly", "sigmoid"])
+    def test_one_class_svm_kernels(self, regression_data, kernel):
+        from sklearn.svm import OneClassSVM
+        X, _ = regression_data
+        est = OneClassSVM(kernel=kernel, nu=0.2, degree=2, coef0=1.0).fit(X)
+        node, _ = self._node(est, X)
+        ocs = node.anomaly_detection.one_class_svm
+        assert ocs.kernel_svm.kernel_type.name == kernel.upper()
+        assert ocs.kernel_svm.degree == est.degree
+        assert ocs.kernel_svm.coef0.double_value == pytest.approx(est.coef0)
+
+    def test_one_class_svm_rejects_precomputed_kernel(self, regression_data):
+        from sklearn.svm import OneClassSVM
+        X, _ = regression_data
+        est = OneClassSVM(kernel="precomputed", nu=0.2)
+        est.fit(X @ X.T)
+        with pytest.raises(NotImplementedError, match="precomputed"):
+            from_sklearn(est, X=X)
+
+    def test_sgd_one_class_svm(self, regression_data):
+        from sklearn.linear_model import SGDOneClassSVM
+        X, _ = regression_data
+        est = SGDOneClassSVM(nu=0.2, random_state=0).fit(X)
+        node, m = self._node(est, X)
+
+        lin = node.anomaly_detection.linear_one_class_svm
+        assert lin is not None
+        # score_samples(X) = X @ coef_, with offset_ applied separately.
+        assert lin.intercept is None
+        assert lin.offset.double_value == pytest.approx(float(est.offset_.ravel()[0]))
+        coef = self._tensor_values(m, lin.coefficients)
+        assert coef == pytest.approx(est.coef_.ravel().tolist())
+
+    def test_anomaly_metadata_is_set(self, regression_data):
+        from sklearn.svm import OneClassSVM
+        X, _ = regression_data
+        node, _ = self._node(OneClassSVM(nu=0.2).fit(X), X)
+        ad = node.anomaly_detection
+        assert ad.task_type.name == "ANOMALY_DETECTION"
+        assert ad.mode.name == "NOVELTY_DETECTION"
+        assert ad.raw_score_polarity.name == "LOWER_MORE_ABNORMAL"
+        assert ad.threshold is not None
+
+
+class TestIsolationForestAnomaly:
+    """IsolationForest → AnomalyDetection.isolation_forest."""
+
+    def _node(self, estimator, X):
+        m = from_sklearn(estimator, X=X)
+        node = next(n for n in m.nodes if n.op == "AnomalyDetection")
+        assert node.domain == "omle.ml"
+        return node, m
+
+    def test_body_is_isolation_forest(self, regression_data):
+        from sklearn.ensemble import IsolationForest
+        X, _ = regression_data
+        est = IsolationForest(n_estimators=10, random_state=0).fit(X)
+        node, _ = self._node(est, X)
+
+        forest = node.anomaly_detection.isolation_forest
+        assert forest is not None
+        assert len(forest.trees) == len(est.estimators_)
+        assert forest.max_samples == int(est.max_samples_)
+        assert forest.offset.double_value == pytest.approx(float(est.offset_))
+
+    def test_metadata_is_outlier_detection(self, regression_data):
+        from sklearn.ensemble import IsolationForest
+        X, _ = regression_data
+        node, _ = self._node(IsolationForest(n_estimators=5, random_state=0).fit(X), X)
+        ad = node.anomaly_detection
+        assert ad.task_type.name == "ANOMALY_DETECTION"
+        # IsolationForest is fitted on data that may already contain outliers.
+        assert ad.mode.name == "OUTLIER_DETECTION"
+        assert ad.raw_score_polarity.name == "LOWER_MORE_ABNORMAL"
+
+    def test_runtime_matches_native(self, regression_data):
+        from sklearn.ensemble import IsolationForest
+        X, _ = regression_data
+        est = IsolationForest(n_estimators=10, random_state=0).fit(X)
+        m = _load_runtime(from_sklearn(est, X=X))
+        # The node's single output is the raw score, i.e. sklearn score_samples.
+        np.testing.assert_allclose(
+            np.asarray(m.predict(X)).ravel(), est.score_samples(X), rtol=1e-6, atol=1e-6)
+
+
+class TestLocalOutlierFactorAnomaly:
+    """LocalOutlierFactor(novelty=True) → AnomalyDetection.local_outlier_factor."""
+
+    def _node(self, estimator, X):
+        m = from_sklearn(estimator, X=X)
+        node = next(n for n in m.nodes if n.op == "AnomalyDetection")
+        assert node.domain == "omle.ml"
+        return node, m
+
+    def test_body_is_local_outlier_factor(self, regression_data):
+        from sklearn.neighbors import LocalOutlierFactor
+        X, _ = regression_data
+        est = LocalOutlierFactor(n_neighbors=10, novelty=True).fit(X)
+        node, m = self._node(est, X)
+
+        lof = node.anomaly_detection.local_outlier_factor
+        assert lof is not None
+        assert lof.n_neighbors == int(est.n_neighbors_)
+        assert lof.metric == est.metric
+        assert lof.offset.double_value == pytest.approx(float(est.offset_))
+        samples = _tv_float64(lof.reference_samples, m)
+        assert len(samples) == est._fit_X.size
+
+    def test_transductive_fit_is_rejected(self, regression_data):
+        from sklearn.neighbors import LocalOutlierFactor
+        X, _ = regression_data
+        # novelty=False has no predict() for unseen data, so there is nothing
+        # to convert — the converter must say so rather than emit a model that
+        # scores differently from the estimator it came from.
+        est = LocalOutlierFactor(n_neighbors=10, novelty=False).fit(X)
+        with pytest.raises(NotImplementedError, match="novelty"):
+            from_sklearn(est, X=X)
+
+    def test_runtime_matches_native(self, regression_data):
+        from sklearn.neighbors import LocalOutlierFactor
+        X, _ = regression_data
+        est = LocalOutlierFactor(n_neighbors=10, novelty=True).fit(X)
+        m = _load_runtime(from_sklearn(est, X=X))
+        np.testing.assert_allclose(
+            np.asarray(m.predict(X)).ravel(), est.score_samples(X), rtol=1e-5, atol=1e-5)
+
+
+class TestEllipticEnvelopeAnomaly:
+    """EllipticEnvelope → AnomalyDetection.elliptic_envelope."""
+
+    def _node(self, estimator, X):
+        m = from_sklearn(estimator, X=X)
+        node = next(n for n in m.nodes if n.op == "AnomalyDetection")
+        assert node.domain == "omle.ml"
+        return node, m
+
+    def test_body_is_elliptic_envelope(self, regression_data):
+        from sklearn.covariance import EllipticEnvelope
+        X, _ = regression_data
+        est = EllipticEnvelope(random_state=0).fit(X)
+        node, m = self._node(est, X)
+
+        env = node.anomaly_detection.elliptic_envelope
+        assert env is not None
+        assert _tv_float64(env.location, m) == pytest.approx(est.location_.ravel().tolist())
+        assert _tv_float64(env.precision, m) == pytest.approx(est.precision_.ravel().tolist())
+        assert _tv_float64(env.covariance, m) == pytest.approx(est.covariance_.ravel().tolist())
+        assert env.offset.double_value == pytest.approx(float(est.offset_))
+
+    def test_runtime_matches_native(self, regression_data):
+        from sklearn.covariance import EllipticEnvelope
+        X, _ = regression_data
+        est = EllipticEnvelope(random_state=0).fit(X)
+        m = _load_runtime(from_sklearn(est, X=X))
+        # score_samples = -mahalanobis(x); the body stores the precision matrix.
+        np.testing.assert_allclose(
+            np.asarray(m.predict(X)).ravel(), est.score_samples(X), rtol=1e-6, atol=1e-6)

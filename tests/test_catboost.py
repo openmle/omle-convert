@@ -646,9 +646,9 @@ class TestCatBoostFileSerialization:
 def _load_runtime(omle_model):
     """Load model into the C++ runtime."""
     try:
-        import omleruntime as omr
+        import omle_runtime as omr
     except ImportError:
-        pytest.skip("omleruntime not installed")
+        pytest.skip("omle_runtime not installed")
     from omle.proto.convert import ir_to_proto
     data = ir_to_proto(omle_model).SerializeToString()
     return omr.load_bytes(data)

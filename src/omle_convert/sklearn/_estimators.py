@@ -6,7 +6,8 @@ from typing import Optional
 
 import omle
 from omle.ir.bodies import TreeEnsemble
-from omle.ir.types import Scalar
+from omle.ir.tensor import Tensor
+from omle.ir.types import TensorValue
 
 from .._common import TaskType, make_node_outputs
 from ._anomaly_detection import (
@@ -158,7 +159,10 @@ def convert_estimator_to_node(
                 trees=trees,
                 aggregation=aggregation,
                 post_transform=post_transform,
-                base_score=Scalar(double_value=base_score) if base_score is not None else None,
+                # A single value; multiclass gradient boosting folds its
+                # per-class intercepts into bias trees instead (see _ensemble).
+                base_scores=(TensorValue.of_tensor(Tensor(float64_data=[base_score]))
+                             if base_score is not None else None),
                 tree_group=tree_group,
             ),
         ))

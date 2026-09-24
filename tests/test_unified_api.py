@@ -6,6 +6,9 @@ per-framework conversion logic, which the framework-specific suites cover.
 """
 
 import json
+import pickle
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -323,3 +326,168 @@ class TestSampleKwargAlias:
         assert "X" in sk and "dataset" not in sk
         sp = kwonly_args("spark/__init__.py", "from_spark_live")
         assert "dataset" in sp and "X" not in sp
+
+
+# ── A real-world mixed-type pipeline ──────────────────────────────────────────
+#
+# sklearn's own "Column Transformer with Mixed Types" example, with an
+# XGBClassifier head: median imputation and scaling for the numeric columns,
+# one-hot plus a chi2 percentile selector for the categorical ones. This is the
+# shape users actually bring to a converter, and it exercises the dispatch layer
+# end to end — to_omle must route a Pipeline whose final step is an XGBoost
+# estimator through the sklearn walker, so the preprocessing is converted too
+# rather than only the ensemble.
+
+@pytest.fixture(scope="module")
+def titanic_pipeline():
+    """Fit the mixed-type Titanic pipeline; skip if OpenML is unreachable."""
+    pytest.importorskip("pandas", reason="fetch_openml needs pandas for as_frame")
+    xgb = pytest.importorskip("xgboost")
+    from sklearn.compose import ColumnTransformer
+    from sklearn.datasets import fetch_openml
+    from sklearn.feature_selection import SelectPercentile, chi2
+    from sklearn.impute import SimpleImputer
+    from sklearn.model_selection import train_test_split
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+    try:
+        X, y = fetch_openml("titanic", version=1, as_frame=True, return_X_y=True)
+    except Exception as exc:  # network down, OpenML outage, no cache
+        pytest.skip(f"titanic could not be fetched from OpenML: {exc}")
+
+    numeric_transformer = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scaler", StandardScaler()),
+    ])
+    categorical_transformer = Pipeline(steps=[
+        ("encoder", OneHotEncoder(handle_unknown="ignore")),
+        ("selector", SelectPercentile(chi2, percentile=50)),
+    ])
+    preprocessor = ColumnTransformer(transformers=[
+        ("num", numeric_transformer, ["age", "fare"]),
+        ("cat", categorical_transformer, ["embarked", "sex", "pclass"]),
+    ])
+    clf = Pipeline(steps=[
+        ("preprocessor", preprocessor),
+        ("classifier", xgb.XGBClassifier(n_estimators=100, max_depth=10,
+                                         learning_rate=1, objective="binary:logistic",
+                                         verbosity=0)),
+    ])
+
+    X_train, X_test, y_train, _ = train_test_split(X, y, test_size=0.2, random_state=0)
+    clf.fit(X_train, y_train.astype(np.int64))
+    return clf, X_train, X_test
+
+
+class TestTitanicMixedPipeline:
+    """to_omle on sklearn's mixed-type example with an XGBoost head."""
+
+    def test_converts(self, titanic_pipeline):
+        clf, X_train, _ = titanic_pipeline
+        assert isinstance(to_omle(clf, X=X_train), omle.OMLEModel)
+
+    def test_routes_through_the_sklearn_walker(self, titanic_pipeline):
+        clf, X_train, _ = titanic_pipeline
+        m = to_omle(clf, X=X_train)
+        names = [f.name for f in m.metadata.source_frameworks]
+        assert "sklearn" in names and "xgboost" in names
+
+    def test_preprocessing_is_converted_not_dropped(self, titanic_pipeline):
+        """The ColumnTransformer must survive as its own node.
+
+        Calling from_xgboost directly emits only the ensemble, which silently
+        feeds raw columns into a model trained on transformed ones. Dispatching
+        through to_omle is what keeps the preprocessing.
+        """
+        clf, X_train, _ = titanic_pipeline
+        ops = [f"{n.domain}.{n.op}" for n in to_omle(clf, X=X_train).nodes]
+        assert "omle.core.Composite" in ops
+        assert "omle.ml.TreeEnsemble" in ops
+
+    def test_model_is_valid(self, titanic_pipeline):
+        clf, X_train, _ = titanic_pipeline
+        assert omle.validate(to_omle(clf, X=X_train)).is_valid
+
+    def test_predict_proba_matches_native(self, titanic_pipeline, tmp_path):
+        """Scores must reproduce the native pipeline's probabilities exactly.
+
+        Still run in a subprocess: this model used to segfault the runtime on
+        load, and an in-process crash takes the whole session down rather than
+        failing one test. The isolation costs a process and keeps a regression
+        legible.
+        """
+        pytest.importorskip("omle_runtime")
+        clf, X_train, X_test = titanic_pipeline
+
+        model_path = tmp_path / "titanic.omle"
+        omle.save(to_omle(clf, X=X_train), model_path)
+        x_path, out_path = tmp_path / "x.pkl", tmp_path / "proba.npy"
+        with open(x_path, "wb") as fh:
+            pickle.dump(X_test, fh)
+
+        script = (
+            "import pickle, sys, numpy as np, omle_runtime as omr\n"
+            "model_path, x_path, out_path = sys.argv[1:4]\n"
+            "X = pickle.load(open(x_path, 'rb'))\n"
+            "np.save(out_path, omr.Model.load(model_path).predict_proba(X))\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", script, str(model_path), str(x_path), str(out_path)],
+            capture_output=True, text=True, timeout=300,
+        )
+        if proc.returncode != 0:
+            detail = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else ""
+            pytest.fail(
+                f"omle-runtime exited with {proc.returncode} "
+                f"({'SIGSEGV' if proc.returncode == -11 else 'error'}): {detail}"
+            )
+
+        np.testing.assert_allclose(
+            np.load(out_path), clf.predict_proba(X_test), rtol=1e-4, atol=1e-4)
+
+
+# ── Single-column categorical pipelines ──────────────────────────────────────
+#
+# A schema whose features all share one source in column order is eligible for
+# the runtime's batch path, which emits one wide tensor instead of one per
+# feature. That path only produces a tensor for numeric sources, so claiming it
+# for a string source left consumers wired to a value nothing produced and the
+# model failed to load with "graph value 'sex__batch__' not found". One string
+# column is the smallest shape that trips it.
+
+@pytest.mark.parametrize(
+    "frame,label",
+    [
+        ({"sex": ["m", "f", "m", "f"] * 8}, "one string column"),
+        ({"sex": ["m", "f", "m", "f"] * 8, "port": ["S", "C", "Q", "S"] * 8},
+         "two string columns"),
+        ({"sex": ["m", "f", "m", "f"] * 8, "pclass": [1, 2, 3, 1] * 8},
+         "string and integer"),
+        ({"pclass": [1, 2, 3, 1] * 8}, "one integer column"),
+    ],
+    ids=["one_string", "two_strings", "string_and_int", "one_int"],
+)
+def test_categorical_pipeline_loads_and_matches(frame, label):
+    pd = pytest.importorskip("pandas")
+    xgb = pytest.importorskip("xgboost")
+    omr = pytest.importorskip("omle_runtime")
+    from sklearn.compose import ColumnTransformer
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import OneHotEncoder
+
+    from omle.proto.convert import ir_to_proto
+
+    df = pd.DataFrame(frame)
+    y = np.array([0, 1, 0, 1] * 8)
+    pipe = Pipeline([
+        ("pre", ColumnTransformer(
+            [("cat", OneHotEncoder(handle_unknown="ignore"), list(df.columns))])),
+        ("clf", xgb.XGBClassifier(n_estimators=10, max_depth=3, verbosity=0)),
+    ]).fit(df, y)
+
+    # load_bytes runs the model's embedded verification, so this also asserts
+    # the converted model reproduces its own recorded outputs.
+    rt = omr.load_bytes(ir_to_proto(to_omle(pipe, X=df)).SerializeToString())
+    np.testing.assert_allclose(
+        rt.predict_proba(df), pipe.predict_proba(df), rtol=1e-6, atol=1e-6)

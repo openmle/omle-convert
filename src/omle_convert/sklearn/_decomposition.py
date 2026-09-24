@@ -69,9 +69,12 @@ def _fast_ica(t, input_name: str, prefix: str, builder: Builder) -> str:
         mean = getattr(t, "mean_", None)
         if mean is not None:
             attrs.append(builder.tensor_attr("mean", f"{prefix}_mean", np.asarray(mean)))
-        whitening = getattr(t, "whitening_", None)
-        if whitening is not None:
-            attrs.append(builder.tensor_attr("whitening", f"{prefix}_whitening", np.asarray(whitening)))
+    # No "whitening" attribute: sklearn's transform is (X - mean_) @ components_.T,
+    # and components_ is already unmixing_ @ whitening_. Emitting whitening_ as well
+    # made the runtime apply it a second time, on top of components that contained
+    # it -- the FastICA node then produced a different projection than sklearn for
+    # every whitened model. The runtime still honours a "whitening" attribute for
+    # producers that store raw unmixing components instead.
     attrs.append(builder.tensor_attr("components", f"{prefix}_components", np.asarray(t.components_)))
     out = builder.unique_name(f"{prefix}_fast_ica")
     return _feature_node("FastICA", input_name, out, attrs, builder,

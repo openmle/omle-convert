@@ -7,6 +7,11 @@ on:
     branches: ["**"]
 
 jobs:
+  # Runs .pre-commit-config.yaml, the same file the local git hook runs, so the
+  # two cannot drift. --all-files because a hook installed locally only ever
+  # sees staged files, and nothing guarantees a contributor installed it at all.
+  # No `pip install -e .` here: every hook brings its own pinned environment, so
+  # the job skips the scikit-learn/xgboost/lightgbm install the test jobs need.
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -14,8 +19,15 @@ jobs:
       - uses: actions/setup-python@v5.6.0
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]"
-      - run: ruff check .
+      - name: Cache pre-commit environments
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+      - run: pip install pre-commit
+      # --show-diff-on-failure prints the patch the autofixing hooks would have
+      # applied, so a red build hands back the fix instead of just a rule name.
+      - run: pre-commit run --all-files --show-diff-on-failure
 
   test:
     name: ${{ matrix.label }}

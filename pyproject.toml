@@ -35,7 +35,7 @@ classifiers = [
 # and pinning it here would only invite version conflicts. A missing framework
 # raises a clear ImportError naming the package to install.
 dependencies = [
-    "omle>=0.1.0",
+    "omle>=0.1.1rc1",
     "numpy>=1.23",
     "pandas>=1.5",
     "pyarrow>=12.0",
@@ -53,6 +53,10 @@ Issues = "https://github.com/openmle/omle-convert/issues"
 dev = [
     "pytest>=8.0",
     "ruff>=0.16",
+    # Local enforcement of .pre-commit-config.yaml. The hook lives in
+    # .git/hooks/, which no clone inherits, so it needs a one-time
+    # `pre-commit install` per checkout; CI runs the same config.
+    "pre-commit>=4.0",
     # Floors track what upstream still maintains, not the oldest thing that
     # once worked. scikit-learn <1.4 additionally import-fails with
     # "numpy.dtype size changed" once numpy>=2 resolves (pre-numpy-2 ABI).
@@ -63,6 +67,21 @@ dev = [
     "category_encoders>=2.6.4",
     "pyspark>=3.5",
     "synapseml",
+    # The numerical verification tests load converted models into the real
+    # runtime. They are guarded by pytest.importorskip("omle_runtime"), so
+    # without this they skip silently and the suite reports green while the
+    # assertions never execute — which is how XGBoost models missing their
+    # base_score shipped. omle-runtime only reached PyPI recently; before that
+    # the gate could not be satisfied in CI at all.
+    "omle-runtime",
+    # The JVM Spark tests drive the transformer from omle-spark. Pinned above
+    # 0.1.0rc4 deliberately: every release up to and including it ships an
+    # `omle/__init__.py`, which overwrites the one from the omle SDK and leaves
+    # `import omle` returning an empty module. Until a release with the
+    # omle_spark layout exists this fails to resolve, which is the intended
+    # outcome — installing rc4 would break the suite in a way that looks like a
+    # bug in omle itself.
+    "omle-spark>=0.1.0rc7",
 ]
 
 [tool.ruff]

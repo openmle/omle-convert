@@ -58,6 +58,24 @@ def _cat_data_type(cat_dtype) -> omle.DataType:
     return omle.DataType.STRING
 
 
+def _token_row(v):
+    """Return *v* as a list of token strings, or None when it is a scalar.
+
+    Spark's ``toPandas()`` materialises an ArrayType column as a numpy object
+    array per row, not a Python list, so an ``isinstance(v, list)`` test misses
+    it and the row gets stringified with ``str()``. That produces
+    ``"['hello' 'world' 'foo']"`` -- brackets, quotes and all -- which no
+    downstream tokenizer or vocabulary lookup can match, so every verification
+    case built from a tokenised column scored as if the row were empty.
+    """
+    import numpy as _np
+    if v is None or isinstance(v, (str, bytes)):
+        return None
+    if isinstance(v, (list, tuple, _np.ndarray)):
+        return [str(t) for t in v]
+    return None
+
+
 def _is_str_dtype(dtype) -> bool:
     """Return True if *dtype* holds strings.
 
@@ -75,12 +93,12 @@ def _is_string_categorical(series) -> bool:
     """Return True if *series* holds string/object categories that need integer encoding."""
     import pandas as pd
     dtype = series.dtype
-    if pd.api.types.is_object_dtype(dtype):
+    if _is_str_dtype(dtype):
         return True
     if isinstance(dtype, pd.CategoricalDtype):
         if dtype.categories is None:
             return True  # unknown; assume strings
-        return (pd.api.types.is_object_dtype(dtype.categories.dtype) or
+        return (_is_str_dtype(dtype.categories.dtype) or
                 pd.api.types.is_string_dtype(dtype.categories.dtype))
     return False
 
@@ -121,7 +139,7 @@ def _col_series_info(series) -> tuple[omle.DataType, omle.MeasureLevel, Optional
             cats = sorted(series.dropna().unique(), key=str)
             data_type = omle.DataType.STRING
         return data_type, measure, _make_discrete_domain(cats)
-    if pd.api.types.is_object_dtype(dtype):
+    if _is_str_dtype(dtype):
         cats = sorted(str(v) for v in series.dropna().unique())
         return omle.DataType.STRING, omle.MeasureLevel.NOMINAL, _make_discrete_domain(cats)
     return omle.DataType.FLOAT64, omle.MeasureLevel.CONTINUOUS, None
@@ -917,10 +935,11 @@ def _make_input_entries(
                 te_id = f"{prefix}_{in_name}"
                 rows_in = series.tolist()
                 first_in = rows_in[0] if rows_in else None
-                if isinstance(first_in, list):
+                if _token_row(first_in) is not None:
                     # Token list input (e.g. Word2Vec): pad to max length → 2-D STRING tensor.
-                    max_len = max((len(r) for r in rows_in), default=0)
-                    flat = [str(t) for row in rows_in
+                    rows_tok = [_token_row(r) or [] for r in rows_in]
+                    max_len = max((len(r) for r in rows_tok), default=0)
+                    flat = [t for row in rows_tok
                             for t in (row + [""] * (max_len - len(row)))]
                     in_shape = [n_rows, max_len]
                 else:
@@ -950,10 +969,22 @@ def _make_input_entries(
                 is_str = (spec.type is not None and spec.type.dtype == omle.DataType.STRING) \
                          or _is_str_dtype(series.dtype)
                 if is_str:
+                    rows_in = series.tolist()
+                    first_in = rows_in[0] if rows_in else None
+                    if _token_row(first_in) is not None:
+                        # Token list column: pad to a rectangular [n, max_len].
+                        rows_tok = [_token_row(r) or [] for r in rows_in]
+                        max_len = max((len(r) for r in rows_tok), default=0)
+                        flat = [t for row in rows_tok
+                                for t in (row + [""] * (max_len - len(row)))]
+                        col_shape = [n_rows, max_len]
+                    else:
+                        flat = [str(v) for v in rows_in]
+                        col_shape = [n_rows, 1]
                     tensor = omle.Tensor(
                         name=col,
-                        string_data=[str(v) for v in series.tolist()],
-                        type=omle.TensorType(dtype=omle.DataType.STRING, shape=[n_rows, 1]),
+                        string_data=flat,
+                        type=omle.TensorType(dtype=omle.DataType.STRING, shape=col_shape),
                     )
                 else:
                     dt     = _spec_dtype(spec)

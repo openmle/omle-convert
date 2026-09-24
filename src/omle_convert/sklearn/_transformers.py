@@ -230,7 +230,17 @@ def convert_transformer(transformer, input_name, prefix: str, builder: Builder) 
         new_out = old_out
     else:
         out_suffix = _TRANSFORMER_SHORT_ALIAS.get(cls_name, node_suffix)
-        new_out = builder.unique_name(f"{input_name}_{out_suffix}")
+        # input_name is a str for a flat tensor, but a list[str] for a
+        # multi-column transformer (see _compose._column_transformer). An
+        # f-string over the list interpolates its repr, producing a tensor
+        # named "['age', 'fare', ...]_ct" — 100+ characters of quotes, commas
+        # and brackets. sklearn itself never names an output after its inputs:
+        # it names by step path (preprocessor__num__imputer), and reserves
+        # per-column identity for get_feature_names_out(). Follow that — fall
+        # back to the step prefix, which is what the node name already uses.
+        # Column-level names are not lost: they live on output.field_names.
+        base = input_name if isinstance(input_name, str) else prefix
+        new_out = builder.unique_name(f"{base}_{out_suffix}")
         new_nodes[-1].name = builder.unique_node_name(f"{prefix}_{node_suffix}")
 
     # Derive field_names from get_feature_names_out() when available.
