@@ -16,7 +16,7 @@ keywords = [
     "xgboost", "lightgbm", "catboost", "spark ml", "inference",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Operating System :: OS Independent",
@@ -35,7 +35,7 @@ classifiers = [
 # and pinning it here would only invite version conflicts. A missing framework
 # raises a clear ImportError naming the package to install.
 dependencies = [
-    "omle>=0.1.1rc1",
+    "omle>=0.1.1",
     "numpy>=1.23",
     "pandas>=1.5",
     "pyarrow>=12.0",
@@ -81,7 +81,7 @@ dev = [
     # omle_spark layout exists this fails to resolve, which is the intended
     # outcome — installing rc4 would break the suite in a way that looks like a
     # bug in omle itself.
-    "omle-spark>=0.1.0rc7",
+    "omle-spark>=0.1.0",
 ]
 
 [tool.ruff]
