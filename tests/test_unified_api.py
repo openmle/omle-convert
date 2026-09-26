@@ -6,9 +6,6 @@ per-framework conversion logic, which the framework-specific suites cover.
 """
 
 import json
-import pickle
-import subprocess
-import sys
 
 import numpy as np
 import pytest
@@ -412,39 +409,19 @@ class TestTitanicMixedPipeline:
     def test_predict_proba_matches_native(self, titanic_pipeline, tmp_path):
         """Scores must reproduce the native pipeline's probabilities exactly.
 
-        Still run in a subprocess: this model used to segfault the runtime on
-        load, and an in-process crash takes the whole session down rather than
-        failing one test. The isolation costs a process and keeps a regression
-        legible.
+        This pipeline is kept as a regression case because loading it once
+        crashed the runtime, so a failure here is worth reading as a load-path
+        problem and not only a numerical one.
         """
-        pytest.importorskip("omle_runtime")
+        omr = pytest.importorskip("omle_runtime")
         clf, X_train, X_test = titanic_pipeline
 
         model_path = tmp_path / "titanic.omle"
-        omle.save(to_omle(clf, X=X_train), model_path)
-        x_path, out_path = tmp_path / "x.pkl", tmp_path / "proba.npy"
-        with open(x_path, "wb") as fh:
-            pickle.dump(X_test, fh)
+        omle.save(to_omle(clf, X=X_test), model_path)
 
-        script = (
-            "import pickle, sys, numpy as np, omle_runtime as omr\n"
-            "model_path, x_path, out_path = sys.argv[1:4]\n"
-            "X = pickle.load(open(x_path, 'rb'))\n"
-            "np.save(out_path, omr.Model.load(model_path).predict_proba(X))\n"
-        )
-        proc = subprocess.run(
-            [sys.executable, "-c", script, str(model_path), str(x_path), str(out_path)],
-            capture_output=True, text=True, timeout=300,
-        )
-        if proc.returncode != 0:
-            detail = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else ""
-            pytest.fail(
-                f"omle-runtime exited with {proc.returncode} "
-                f"({'SIGSEGV' if proc.returncode == -11 else 'error'}): {detail}"
-            )
-
+        proba = omr.Model.load(str(model_path)).predict_proba(X_test)
         np.testing.assert_allclose(
-            np.load(out_path), clf.predict_proba(X_test), rtol=1e-4, atol=1e-4)
+            proba, clf.predict_proba(X_test), rtol=1e-4, atol=1e-4)
 
 
 # ── Single-column categorical pipelines ──────────────────────────────────────
